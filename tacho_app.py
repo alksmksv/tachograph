@@ -166,6 +166,12 @@ def process_file_fast(file_bytes, file_name):
   agg_df["dt_date"] = agg_df["shift_start"].dt.date
   agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
 
+  # Извлекаем 2-ю и 3-ю буквы (индексы 1:3 в Python)
+  extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
+  agg_df["vehicle_country"] = np.where(
+      extracted_code.isin(["CZ", "SK"]), extracted_code, "Other"
+  )
+
   # Привязываем часы и страну отдыха перед сменой
   agg_df["rest_before_shift_hours"] = agg_df["shift_id"].map(rest_before_hours)
   agg_df["rest_country_before_shift"] = (
@@ -193,6 +199,7 @@ def process_file_fast(file_bytes, file_name):
       "dt_date",
       "date",
       "group",
+      "vehicle_country",
       "vehicle_name",
       "driver_name",
       "rest_country_before_shift",
@@ -311,6 +318,9 @@ if uploaded_file:
     return selected
 
   # Рендер селекторов
+  selected_vehicle_countries = render_select_filter(
+      "Страна авто", ["CZ", "SK", "Other"], "v_countries"
+  )
   selected_groups = render_select_filter(
       "Группы", daily_df["group"].unique(), "groups"
   )
@@ -380,7 +390,7 @@ if uploaded_file:
   shift_min, shift_max = render_range_filter("Длина смены", max_shift, "shift")
   drive_min, drive_max = render_range_filter("Время езды", max_drive, "drive")
 
-  # Новый фильтр по проценту езды
+  # Фильтр по проценту езды
   pct_min, pct_max = render_range_filter(
       "% езды от смены", 100.0, "pct", step=5.0, unit="%"
   )
@@ -400,6 +410,8 @@ if uploaded_file:
   if isinstance(date_range, tuple) and len(date_range) == 2:
     mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
 
+  if selected_vehicle_countries:
+    mask &= daily_df["vehicle_country"].isin(selected_vehicle_countries)
   if selected_groups:
     mask &= daily_df["group"].isin(selected_groups)
   if selected_vehicles:
@@ -423,6 +435,7 @@ if uploaded_file:
       columns={
           "date": "Дата",
           "group": "Группа",
+          "vehicle_country": "Страна авто",
           "vehicle_name": "Машина",
           "driver_name": "Водитель",
           "rest_country_before_shift": "Страна отдыха ДО смены",
