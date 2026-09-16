@@ -92,6 +92,26 @@ st.markdown(
 
 
 # ==============================================================================
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА
+# ==============================================================================
+def get_rest_color(hours):
+  if pd.isna(hours):
+    return ""
+  try:
+    h = float(hours)
+  except:
+    return ""
+
+  if 9.0 < h <= 11.0:
+    return "background-color: #FEF9C3;"  # Светло-желтый
+  elif 24.0 < h <= 45.0:
+    return "background-color: #FFEDD5;"  # Светло-оранжевый
+  elif h > 45.0:
+    return "background-color: #DCFCE7;"  # Светло-зеленый
+  return ""
+
+
+# ==============================================================================
 # БЫСТРАЯ ВЕКТОРНАЯ ОБРАБОТКА ДАННЫХ
 # ==============================================================================
 @st.cache_data(show_spinner="Обработка файла...")
@@ -401,10 +421,8 @@ if uploaded_file:
   # СТРАНИЦА: MAIN
   # ==============================================================================
   if nav_page == "Main":
-    # Сохраняем сырые часы для подсветки синим (> 24ч) в отдельном словаре по индексу
     raw_rest_dict = filtered["rest_before_shift_hours"].to_dict()
 
-    # Форматируем часы отдыха до 2 знаков после запятой для вывода
     filtered_display = filtered.copy()
     filtered_display["rest_before_shift_hours"] = filtered_display["rest_before_shift_hours"].apply(
         lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
@@ -436,15 +454,17 @@ if uploaded_file:
       if df.empty:
         return df.style
 
-      def style_rows(row):
+      def style_specific_cell(row):
         styles = ['' for _ in row]
         idx = row.name
         raw_val = raw_rest_dict.get(idx)
-        if pd.notna(raw_val) and raw_val > 24.0:
-          styles = ['background-color: #E0F2FE' for _ in row]
+        color_style = get_rest_color(raw_val)
+        if color_style and 'Отдых ДО смены (ч)' in df.columns:
+          col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
+          styles[col_idx] = color_style
         return styles
 
-      styler = df.style.apply(style_rows, axis=1)
+      styler = df.style.apply(style_specific_cell, axis=1)
       
       def highlight_borders(df_sub):
         css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
@@ -494,31 +514,50 @@ if uploaded_file:
       st.info("Данные не найдены.")
 
   # ==============================================================================
-  # СТРАНИЦА: CALENDAR (Матрица машин по датам)
+  # СТРАНИЦА: CALENDAR (Матрица машин по датам с цветокодингом)
   # ==============================================================================
   elif nav_page == "Calendar":
     st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
 
     if not filtered.empty:
-      # Подготавливаем формат часов с 2 знаками
       pivot_df = filtered.copy()
       pivot_df["formatted_hours"] = pivot_df["rest_before_shift_hours"].apply(
           lambda x: f"{x:.2f}" if pd.notna(x) else ""
       )
 
-      # Если на одну дату у машины приходится несколько пауз, объединяем их через "/"
       grouped_matrix = (
           pivot_df.groupby(["vehicle_name", "date"])["formatted_hours"]
           .apply(lambda x: " / ".join([str(v) for v in x if v != ""]))
           .reset_index()
       )
 
-      # Строим пивот-таблицу: строки — машины, столбцы — даты
       calendar_table = grouped_matrix.pivot(
           index="vehicle_name", columns="date", values="formatted_hours"
       ).fillna("")
 
-      st.dataframe(calendar_table, use_container_width=True, height=750)
+      # Функция стилизации ячеек календарной матрицы
+      def style_calendar_cell(val):
+        if not val or pd.isna(val):
+          return ""
+        parts = str(val).split("/")
+        max_h = 0.0
+        has_val = False
+        for p in parts:
+          p_str = p.strip()
+          if p_str:
+            try:
+              h = float(p_str)
+              if h > max_h:
+                max_h = h
+              has_val = True
+            except:
+              pass
+        if not has_val:
+          return ""
+        return get_rest_color(max_h)
+
+      styled_calendar = calendar_table.style.map(style_calendar_cell)
+      st.dataframe(styled_calendar, use_container_width=True, height=750)
     else:
       st.info("Нет данных для отображения матрицы.")
 
