@@ -115,7 +115,6 @@ def process_file_fast(file_bytes, file_name):
   if "group" not in df.columns:
     df["group"] = "Н/Д"
 
-  # Если в файле нет страны, создаем колонку N/A
   if "country" not in df.columns:
     df["country"] = "N/A"
   else:
@@ -138,33 +137,36 @@ def process_file_fast(file_bytes, file_name):
   )
   df["shift_id"] = (is_rest | change_group).cumsum()
 
-  # Запоминаем часы отдыха и страну отдыха
+  # Запоминаем часы отдыха, страну отдыха, а также начало и конец паузы (до смены)
   df["rest_hours"] = np.where(is_rest, (dur_min / 60).round(2), np.nan)
   df["rest_country"] = np.where(is_rest, df["country"], np.nan)
+  df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
+  df["pause_end_dt"] = np.where(is_rest, df["end_datetime"], pd.NaT)
 
   rest_before_hours = df[is_rest].groupby("shift_id")["rest_hours"].first()
   rest_before_country = df[is_rest].groupby("shift_id")["rest_country"].first()
+  pause_start_before = df[is_rest].groupby("shift_id")["pause_start_dt"].first()
+  pause_end_before = df[is_rest].groupby("shift_id")["pause_end_dt"].first()
 
   work_df = df[~is_rest].copy()
   if work_df.empty:
     return pd.DataFrame()
 
-  work_df["driving_minutes"] = np.where(
-      work_df["activity_type"].astype(str).str.upper() == "DRIVING",
-      work_df["duration_minutes"],
-      0,
-  )
-
   agg_df = work_df.groupby(
       ["shift_id", "vehicle_name", "driver_name", "group"], as_index=False
   ).agg(
       shift_start=("start_datetime", "min"),
-      shift_end=("end_datetime", "max"),
-      driving_minutes=("driving_minutes", "sum"),
   )
 
   agg_df["dt_date"] = agg_df["shift_start"].dt.date
   agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
+
+  # День недели выбранной даты (на русском)
+  days_ru = {
+      0: "Понедельник", 1: "Вторник", 2: "Среда", 
+      3: "Четверг", 4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+  }
+  agg_df["weekday"] = agg_df["shift_start"].dt.dayofweek.map(days_ru)
 
   # Извлекаем 2-ю и 3-ю буквы (индексы 1:3 в Python)
   extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
@@ -172,43 +174,29 @@ def process_file_fast(file_bytes, file_name):
       extracted_code.isin(["CZ", "SK"]), extracted_code, "Other"
   )
 
-  # Привязываем часы и страну отдыха перед сменой
+  # Привязываем параметры отдыха перед сменой
   agg_df["rest_before_shift_hours"] = agg_df["shift_id"].map(rest_before_hours)
   agg_df["rest_country_before_shift"] = (
       agg_df["shift_id"].map(rest_before_country).fillna("N/A")
   )
+  agg_df["pause_start"] = agg_df["shift_id"].map(pause_start_before)
+  agg_df["pause_end"] = agg_df["shift_id"].map(pause_end_before)
 
-  agg_df["shift_duration_hours"] = (
-      (agg_df["shift_end"] - agg_df["shift_start"]).dt.total_seconds() / 3600
-  ).round(2)
-  agg_df["driving_hours"] = (agg_df["driving_minutes"] / 60).round(2)
-
-  # Процент ездового времени к длине смены
-  agg_df["drive_pct"] = np.where(
-      agg_df["shift_duration_hours"] > 0,
-      ((agg_df["driving_hours"] / agg_df["shift_duration_hours"]) * 100).round(
-          1
-      ),
-      0.0,
-  )
-
-  agg_df["shift_start"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d %H:%M")
-  agg_df["shift_end"] = agg_df["shift_end"].dt.strftime("%Y-%m-%d %H:%M")
+  agg_df["pause_start"] = pd.to_datetime(agg_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
+  agg_df["pause_end"] = pd.to_datetime(agg_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
 
   cols = [
       "dt_date",
       "date",
+      "weekday",
       "group",
       "vehicle_country",
       "vehicle_name",
       "driver_name",
       "rest_country_before_shift",
       "rest_before_shift_hours",
-      "shift_start",
-      "shift_end",
-      "shift_duration_hours",
-      "driving_hours",
-      "drive_pct",
+      "pause_start",
+      "pause_end",
   ]
   return agg_df[cols]
 
@@ -281,7 +269,6 @@ if uploaded_file:
   )
   st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
-  # Функция отрисовки компактных селектов с синими тегами
   def render_select_filter(label, options, key_prefix):
     sel_key = f"{key_prefix}_select"
     all_opts = sorted(list(set(options)))
@@ -336,7 +323,7 @@ if uploaded_file:
       "countries",
   )
 
-  # Диапазонные фильтры
+  # Диапазонный фильтр для отдыха
   def render_range_filter(label, max_val, key_prefix, step=0.5, unit="ч"):
     min_k, max_k = f"{key_prefix}_min", f"{key_prefix}_max"
 
@@ -381,19 +368,7 @@ if uploaded_file:
   max_rest = max(
       float(daily_df["rest_before_shift_hours"].max() or 24.0) + 1.0, 10.0
   )
-  max_shift = max(
-      float(daily_df["shift_duration_hours"].max() or 24.0) + 1.0, 10.0
-  )
-  max_drive = max(float(daily_df["driving_hours"].max() or 15.0) + 1.0, 10.0)
-
   rest_min, rest_max = render_range_filter("Отдых ДО смены", max_rest, "rest")
-  shift_min, shift_max = render_range_filter("Длина смены", max_shift, "shift")
-  drive_min, drive_max = render_range_filter("Время езды", max_drive, "drive")
-
-  # Фильтр по проценту езды
-  pct_min, pct_max = render_range_filter(
-      "% езды от смены", 100.0, "pct", step=5.0, unit="%"
-  )
 
   st.sidebar.button(
       "🔄 Сбросить ВСЕ фильтры",
@@ -406,7 +381,6 @@ if uploaded_file:
   # --------------------------------------------------------------------------
   mask = pd.Series(True, index=daily_df.index)
 
-  # Дата
   if isinstance(date_range, tuple) and len(date_range) == 2:
     mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
 
@@ -425,33 +399,55 @@ if uploaded_file:
       daily_df["rest_before_shift_hours"].between(rest_min, rest_max)
       | daily_df["rest_before_shift_hours"].isna()
   )
-  mask &= daily_df["shift_duration_hours"].between(shift_min, shift_max)
-  mask &= daily_df["driving_hours"].between(drive_min, drive_max)
-  mask &= daily_df["drive_pct"].between(pct_min, pct_max)
 
   filtered = daily_df[mask].drop(columns=["dt_date"])
 
   display_df = filtered.rename(
       columns={
           "date": "Дата",
+          "weekday": "День недели",
           "group": "Группа",
           "vehicle_country": "Страна авто",
           "vehicle_name": "Машина",
           "driver_name": "Водитель",
           "rest_country_before_shift": "Страна отдыха ДО смены",
           "rest_before_shift_hours": "Отдых ДО смены (ч)",
-          "shift_start": "Начало смены",
-          "shift_end": "Закрытие смены",
-          "shift_duration_hours": "Длина смены (ч)",
-          "driving_hours": "Время езды (ч)",
-          "drive_pct": "% езды",
+          "pause_start": "Начало паузы",
+          "pause_end": "Конец паузы",
       }
   )
 
+  # --------------------------------------------------------------------------
+  # УРОВНИ СОРТИРОВКИ НАД ТАБЛИЦЕЙ
+  # --------------------------------------------------------------------------
+  st.markdown("<div class='main-header'>Параметры сортировки таблицы</div>", unsafe_allow_html=True)
+  
+  sort_cols_options = [col for col in display_df.columns if col != "Машина"]
+  
+  col_s1, col_s2 = st.columns(2)
+  with col_s1:
+    sort_1 = st.selectbox("Сортировка 1-й очереди", options=sort_cols_options, index=0)
+  with col_s2:
+    sort_2 = st.selectbox("Сортировка 2-й очереди", options=["Нет"] + sort_cols_options, index=0)
+
+  # Формируем список сортировки: "Машина" ВСЕГДА первая, чтобы строки одной машины были рядом
+  sorting_columns = ["Машина", sort_1]
+  ascending_flags = [True, True]
+
+  if sort_2 != "Нет" and sort_2 != sort_1:
+    sorting_columns.append(sort_2)
+    ascending_flags.append(True)
+
+  if not display_df.empty:
+    display_df = display_df.sort_values(by=sorting_columns, ascending=ascending_flags)
+
+  # --------------------------------------------------------------------------
+  # ВЫВОД ЗАГОЛОВКА И ТАБЛИЦЫ
+  # --------------------------------------------------------------------------
   col_h, col_b = st.columns([4, 1])
   with col_h:
     st.markdown(
-        "<div class='main-header'>Мониторинг смен (найдено:"
+        "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
         f" {len(display_df)})</div>",
         unsafe_allow_html=True,
     )
