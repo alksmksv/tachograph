@@ -92,9 +92,9 @@ st.markdown(
 
 
 # ==============================================================================
-# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА ЧАСОВ ОТДЫХА
 # ==============================================================================
-def get_rest_color(hours):
+def get_rest_color(hours, is_fourth_restricted=False):
   if pd.isna(hours):
     return ""
   try:
@@ -103,6 +103,8 @@ def get_rest_color(hours):
     return ""
 
   if 9.0 < h <= 11.0:
+    if is_fourth_restricted:
+      return "background-color: #FEE2E2;"  # Светло-красный для 4-й сокращенной/обычной паузы подряд
     return "background-color: #FEF9C3;"  # Светло-желтый
   elif 24.0 < h <= 45.0:
     return "background-color: #FFEDD5;"  # Светло-оранжевый
@@ -196,6 +198,35 @@ def process_file_fast(file_bytes, file_name):
   agg_df["pause_start"] = pd.to_datetime(agg_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
   agg_df["pause_end"] = pd.to_datetime(agg_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
 
+  # Вычисляем правило для 4-й паузы (9-11ч) после отдыха > 24ч внутри каждой машины
+  is_fourth_flags = []
+  for _, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
+    consecutive_count = 0
+    for idx, row in v_group.iterrows():
+      h = row["rest_before_shift_hours"]
+      if pd.isna(h):
+        is_fourth_flags.append((idx, False))
+        continue
+      
+      if h > 24.0:
+        consecutive_count = 0
+        is_fourth_flags.append((idx, False))
+      else:
+        if 9.0 <= h <= 11.0:
+          consecutive_count += 1
+          if consecutive_count == 4:
+            is_fourth_flags.append((idx, True))
+            consecutive_count = 0 # сброс счетчика после срабатывания
+          else:
+            is_fourth_flags.append((idx, False))
+        else:
+          # Если между ними был какой-то другой отдых (например, 15 часов)
+          consecutive_count += 1
+          is_fourth_flags.append((idx, False))
+
+  fourth_dict = dict(is_fourth_flags)
+  agg_df["is_fourth_9_11"] = agg_df.index.map(fourth_dict).fillna(False)
+
   cols = [
       "dt_date",
       "date",
@@ -208,6 +239,7 @@ def process_file_fast(file_bytes, file_name):
       "rest_before_shift_hours",
       "pause_start",
       "pause_end",
+      "is_fourth_9_11",
   ]
   return agg_df[cols]
 
@@ -422,13 +454,14 @@ if uploaded_file:
   # ==============================================================================
   if nav_page == "Main":
     raw_rest_dict = filtered["rest_before_shift_hours"].to_dict()
+    fourth_flag_dict = filtered["is_fourth_9_11"].to_dict()
 
     filtered_display = filtered.copy()
     filtered_display["rest_before_shift_hours"] = filtered_display["rest_before_shift_hours"].apply(
         lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
     )
 
-    display_df = filtered_display.rename(
+    display_df = filtered_display.drop(columns=["is_fourth_9_11"]).rename(
         columns={
             "date": "Дата",
             "weekday": "День недели",
@@ -454,17 +487,29 @@ if uploaded_file:
       if df.empty:
         return df.style
 
-      def style_specific_cell(row):
+      def style_specific_row_and_cell(row):
         styles = ['' for _ in row]
         idx = row.name
         raw_val = raw_rest_dict.get(idx)
-        color_style = get_rest_color(raw_val)
-        if color_style and 'Отдых ДО смены (ч)' in df.columns:
+        is_fourth = fourth_flag_dict.get(idx, False)
+
+        # 1. Если отдых >= 24, красим всю строку светло-синим фона
+        is_rest_ge_24 = pd.notna(raw_val) and raw_val >= 24.0
+        if is_rest_ge_24:
+          styles = ['background-color: #E0F2FE' for _ in row]
+
+        # 2. Переопределяем ячейку с часами отдыха согласно ее конкретным правилам цветов
+        if 'Отдых ДО смены (ч)' in df.columns:
           col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
-          styles[col_idx] = color_style
+          color_style = get_rest_color(raw_val, is_fourth_restricted=is_fourth)
+          if color_style:
+            styles[col_idx] = color_style
+          elif not is_rest_ge_24:
+            styles[col_idx] = ''
+
         return styles
 
-      styler = df.style.apply(style_specific_cell, axis=1)
+      styler = df.style.apply(style_specific_row_and_cell, axis=1)
       
       def highlight_borders(df_sub):
         css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
@@ -514,7 +559,7 @@ if uploaded_file:
       st.info("Данные не найдены.")
 
   # ==============================================================================
-  # СТРАНИЦА: CALENDAR (Матрица машин по датам с цветокодингом)
+  # СТРАНИЦА: CALENDAR (Матрица машин по датам с жирными выходными)
   # ==============================================================================
   elif nav_page == "Calendar":
     st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
@@ -526,8 +571,12 @@ if uploaded_file:
       )
 
       grouped_matrix = (
-          pivot_df.groupby(["vehicle_name", "date"])["formatted_hours"]
-          .apply(lambda x: " / ".join([str(v) for v in x if v != ""]))
+          pivot_df.groupby(["vehicle_name", "date"])
+          .agg({
+              "formatted_hours": lambda x: " / ".join([str(v) for v in x if v != ""]),
+              "is_fourth_9_11": "any",
+              "rest_before_shift_hours": "max"
+          })
           .reset_index()
       )
 
@@ -535,28 +584,45 @@ if uploaded_file:
           index="vehicle_name", columns="date", values="formatted_hours"
       ).fillna("")
 
-      # Функция стилизации ячеек календарной матрицы
-      def style_calendar_cell(val):
-        if not val or pd.isna(val):
-          return ""
-        parts = str(val).split("/")
-        max_h = 0.0
-        has_val = False
-        for p in parts:
-          p_str = p.strip()
-          if p_str:
-            try:
-              h = float(p_str)
-              if h > max_h:
-                max_h = h
-              has_val = True
-            except:
-              pass
-        if not has_val:
-          return ""
-        return get_rest_color(max_h)
+      # Дополнительный маппинг для определения 4-й паузы в календаре
+      fourth_matrix = grouped_matrix.pivot(
+          index="vehicle_name", columns="date", values="is_fourth_9_11"
+      ).fillna(False)
 
-      styled_calendar = calendar_table.style.map(style_calendar_cell)
+      hours_matrix = grouped_matrix.pivot(
+          index="vehicle_name", columns="date", values="rest_before_shift_hours"
+      )
+
+      def style_calendar_cell(data):
+        # Создаем DataFrame для стилей такого же размера, как calendar_table
+        df_styles = pd.DataFrame('', index=calendar_table.index, columns=calendar_table.columns)
+        
+        for col in calendar_table.columns:
+          # Проверяем, является ли день выходным (суббота / воскресенье)
+          try:
+            is_weekend = pd.to_datetime(col).dayofweek in [5, 6]
+          except:
+            is_weekend = False
+
+          for idx in calendar_table.index:
+            val = calendar_table.loc[idx, col]
+            is_fourth = fourth_matrix.loc[idx, col] if col in fourth_matrix.columns and idx in fourth_matrix.index else False
+            h_max = hours_matrix.loc[idx, col] if col in hours_matrix.columns and idx in hours_matrix.index else np.nan
+
+            bg_style = ""
+            if val and not pd.isna(val):
+              bg_style = get_rest_color(h_max, is_fourth_restricted=is_fourth)
+            
+            # Добавляем жирную границу слева для выходных дней
+            border_style = "border-left: 2px solid #64748B !important;" if is_weekend else ""
+            
+            if bg_style or border_style:
+              # Убираем точку с запятой из bg_style перед конкатенацией или аккуратно соединяем
+              df_styles.loc[idx, col] = f"{bg_style} {border_style}"
+
+        return df_styles
+
+      styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None)
       st.dataframe(styled_calendar, use_container_width=True, height=750)
     else:
       st.info("Нет данных для отображения матрицы.")
