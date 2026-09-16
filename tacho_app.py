@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(layout="wide", page_title="Мониторинг смен")
 
 # ==============================================================================
-# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI, ЖИРНЫЕ ГРАНИЦЫ И ПОДСВЕТКА ПАУЗ > 24Ч
+# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI И НАВИГАЦИЯ
 # ==============================================================================
 st.markdown(
     """
@@ -21,7 +21,6 @@ st.markdown(
         padding: 0.4rem !important;
     }
 
-    /* Уменьшенные карточки фильтров (единый стиль для всех) */
     .filter-card {
         border: 1px solid #CBD5E1;
         background-color: #F8FAFC;
@@ -36,7 +35,6 @@ st.markdown(
         margin-bottom: 2px;
     }
 
-    /* Синие компактные блоки выбранных значений в multiselect */
     [data-baseweb="tag"] {
         background-color: #2563EB !important;
         border-radius: 3px !important;
@@ -51,7 +49,6 @@ st.markdown(
         font-size: 10px !important;
     }
 
-    /* Единый компактный размер инпутов, селектов и мультиселектов */
     div[data-baseweb="select"] > div, 
     div[data-testid="stNumberInput"] input,
     div[data-testid="stDateInput"] input {
@@ -68,7 +65,6 @@ st.markdown(
         display: none !important;
     }
     
-    /* Кнопки "Все" / "Сброс" */
     div[data-testid="stSidebar"] button {
         background-color: #1E3A8A !important;
         color: white !important;
@@ -127,7 +123,6 @@ def process_file_fast(file_bytes, file_name):
   act_type = df["activity_type"].astype(str).str.upper()
   dur_min = df["duration_minutes"].fillna(0)
 
-  # Фиксируем межсменный отдых (RESTING или CARDLESS от 9 часов / 540 мин)
   is_rest = act_type.isin(["RESTING", "CARDLESS"]) & (dur_min >= 540)
 
   change_group = (
@@ -137,7 +132,6 @@ def process_file_fast(file_bytes, file_name):
   )
   df["shift_id"] = (is_rest | change_group).cumsum()
 
-  # Запоминаем часы отдыха, страну отдыха, а также начало и конец паузы (до смены)
   df["rest_hours"] = np.where(is_rest, (dur_min / 60), np.nan)
   df["rest_country"] = np.where(is_rest, df["country"], np.nan)
   df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
@@ -161,20 +155,17 @@ def process_file_fast(file_bytes, file_name):
   agg_df["dt_date"] = agg_df["shift_start"].dt.date
   agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
 
-  # День недели выбранной даты (сокращенный формат на русском)
   days_ru = {
       0: "ПН", 1: "ВТ", 2: "СР", 
       3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"
   }
   agg_df["weekday"] = agg_df["shift_start"].dt.dayofweek.map(days_ru)
 
-  # Извлекаем 2-ю и 3-ю буквы (индексы 1:3 в Python)
   extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
   agg_df["vehicle_country"] = np.where(
       extracted_code.isin(["CZ", "SK"]), extracted_code, "Other"
   )
 
-  # Привязываем параметры отдыха перед сменой
   agg_df["rest_before_shift_hours"] = agg_df["shift_id"].map(rest_before_hours)
   agg_df["rest_country_before_shift"] = (
       agg_df["shift_id"].map(rest_before_country).fillna("N/A")
@@ -214,9 +205,6 @@ def convert_df_to_excel(df):
   return output.getvalue()
 
 
-# ==============================================================================
-# CALLBACKС ДЛЯ СБРОСА
-# ==============================================================================
 def reset_select_key(key, values):
   st.session_state[key] = values
 
@@ -250,7 +238,6 @@ if uploaded_file:
   file_bytes = uploaded_file.getvalue()
   daily_df = process_file_fast(file_bytes, uploaded_file.name)
 
-  # 1. Фильтр Даты (Календарь Диапазон)
   min_date = daily_df["dt_date"].min()
   max_date = daily_df["dt_date"].max()
 
@@ -304,7 +291,6 @@ if uploaded_file:
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
     return selected
 
-  # Рендер селекторов
   selected_vehicle_countries = render_select_filter(
       "Страна авто", ["CZ", "SK", "Other"], "v_countries"
   )
@@ -323,7 +309,6 @@ if uploaded_file:
       "countries",
   )
 
-  # Диапазонный фильтр для отдыха
   def render_range_filter(label, max_val, key_prefix, step=0.5, unit="ч"):
     min_k, max_k = f"{key_prefix}_min", f"{key_prefix}_max"
 
@@ -376,9 +361,19 @@ if uploaded_file:
       on_click=reset_all_filters,
   )
 
-  # --------------------------------------------------------------------------
+  # ==============================================================================
+  # НАВИГАЦИЯ СВЕРХУ (Main / Calendar)
+  # ==============================================================================
+  nav_page = st.radio(
+      "Навигация",
+      options=["Main", "Calendar"],
+      horizontal=True,
+      label_visibility="collapsed"
+  )
+
+  # ==============================================================================
   # ВЕКТОРНАЯ ФИЛЬТРАЦИЯ
-  # --------------------------------------------------------------------------
+  # ==============================================================================
   mask = pd.Series(True, index=daily_df.index)
 
   if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -402,112 +397,130 @@ if uploaded_file:
 
   filtered = daily_df[mask].drop(columns=["dt_date"])
 
-  # Сохраняем «сырые» часы отдыха для проверки условия > 24 перед окружением в строку
-  filtered["_raw_rest_hours"] = filtered["rest_before_shift_hours"]
+  # ==============================================================================
+  # СТРАНИЦА: MAIN
+  # ==============================================================================
+  if nav_page == "Main":
+    # Сохраняем сырые часы для подсветки синим (> 24ч) в отдельном словаре по индексу
+    raw_rest_dict = filtered["rest_before_shift_hours"].to_dict()
 
-  # Округляем часы отдыха до 2 знаков после запятой для вывода
-  filtered["rest_before_shift_hours"] = filtered["rest_before_shift_hours"].apply(
-      lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
-  )
-
-  display_df = filtered.rename(
-      columns={
-          "date": "Дата",
-          "weekday": "День недели",
-          "group": "Группа",
-          "vehicle_country": "Страна авто",
-          "vehicle_name": "Машина",
-          "driver_name": "Водитель",
-          "rest_country_before_shift": "Страна отдыха ДО смены",
-          "rest_before_shift_hours": "Отдых ДО смены (ч)",
-          "pause_start": "Начало паузы",
-          "pause_end": "Конец паузы",
-      }
-  )
-
-  # --------------------------------------------------------------------------
-  # СТРОГАЯ ЛОГИКА: МИНИ-ТАБЛИЦЫ ДЛЯ КАЖДОЙ МАШИНЫ С АППЕНДОМ БЕЗ ПЕРЕСОРТИРОВКИ
-  # --------------------------------------------------------------------------
-  if not display_df.empty:
-    sub_dfs = []
-    for vehicle, group_df in display_df.groupby("Машина", sort=True):
-      sorted_sub = group_df.sort_values(by="Дата", ascending=True)
-      sub_dfs.append(sorted_sub)
-    
-    display_df = pd.concat(sub_dfs, ignore_index=True)
-
-  # --------------------------------------------------------------------------
-  # СТИЛИЗАЦИЯ ЕДИНОЙ ТАБЛИЦЫ (Подсветка паузы > 24ч и жирная граница между машинами)
-  # --------------------------------------------------------------------------
-  def apply_table_styling(df):
-    if df.empty:
-      return df.style
-
-    def style_rows(row):
-      styles = ['' for _ in row]
-      raw_val = row.get('_raw_rest_hours')
-      # Подсветка синим цветом, если пауза строго больше 24 часов
-      if pd.notna(raw_val) and raw_val > 24.0:
-        styles = ['background-color: #E0F2FE' for _ in row]
-      return styles
-
-    styler = df.style.apply(style_rows, axis=1)
-    
-    # Добавление жирной границы на стыке разных машин
-    def highlight_borders(df_sub):
-      css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
-      cars = df_sub['Машина'].values
-      for i in range(1, len(cars)):
-        if cars[i] != cars[i-1]:
-          css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
-      return css_styles
-
-    styler.apply(highlight_borders, axis=None)
-    return styler
-
-  # Удаляем временную колонку `_raw_rest_hours` перед отображением (оставляем её для стилизации)
-  render_df = display_df.drop(columns=["_raw_rest_hours"], errors="ignore")
-
-  # --------------------------------------------------------------------------
-  # ВЫВОД ЗАГОЛОВКА И ТАБЛИЦЫ
-  # --------------------------------------------------------------------------
-  col_h, col_b = st.columns([4, 1])
-  with col_h:
-    st.markdown(
-        "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
-        f" {len(render_df)})</div>",
-        unsafe_allow_html=True,
+    # Форматируем часы отдыха до 2 знаков после запятой для вывода
+    filtered_display = filtered.copy()
+    filtered_display["rest_before_shift_hours"] = filtered_display["rest_before_shift_hours"].apply(
+        lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
     )
-  with col_b:
-    if not render_df.empty:
-      excel_file = convert_df_to_excel(render_df)
-      st.download_button(
-          label="📥 Скачать Excel",
-          data=excel_file,
-          file_name="monitoring_smen.xlsx",
-          mime=(
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          ),
+
+    display_df = filtered_display.rename(
+        columns={
+            "date": "Дата",
+            "weekday": "День недели",
+            "group": "Группа",
+            "vehicle_country": "Страна авто",
+            "vehicle_name": "Машина",
+            "driver_name": "Водитель",
+            "rest_country_before_shift": "Страна отдыха ДО смены",
+            "rest_before_shift_hours": "Отдых ДО смены (ч)",
+            "pause_start": "Начало паузы",
+            "pause_end": "Конец паузы",
+        }
+    )
+
+    if not display_df.empty:
+      sub_dfs = []
+      for vehicle, group_df in display_df.groupby("Машина", sort=True):
+        sorted_sub = group_df.sort_values(by="Дата", ascending=True)
+        sub_dfs.append(sorted_sub)
+      display_df = pd.concat(sub_dfs, ignore_index=True)
+
+    def apply_table_styling(df):
+      if df.empty:
+        return df.style
+
+      def style_rows(row):
+        styles = ['' for _ in row]
+        idx = row.name
+        raw_val = raw_rest_dict.get(idx)
+        if pd.notna(raw_val) and raw_val > 24.0:
+          styles = ['background-color: #E0F2FE' for _ in row]
+        return styles
+
+      styler = df.style.apply(style_rows, axis=1)
+      
+      def highlight_borders(df_sub):
+        css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
+        cars = df_sub['Машина'].values
+        for i in range(1, len(cars)):
+          if cars[i] != cars[i-1]:
+            css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
+        return css_styles
+
+      styler.apply(highlight_borders, axis=None)
+      return styler
+
+    col_h, col_b = st.columns([4, 1])
+    with col_h:
+      st.markdown(
+          "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
+          f" {len(display_df)})</div>",
+          unsafe_allow_html=True,
+      )
+    with col_b:
+      if not display_df.empty:
+        excel_file = convert_df_to_excel(display_df)
+        st.download_button(
+            label="📥 Скачать Excel",
+            data=excel_file,
+            file_name="monitoring_smen.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+    if not display_df.empty:
+      styled_display = apply_table_styling(display_df.head(500))
+      st.dataframe(
+          styled_display,
           use_container_width=True,
+          hide_index=True,
+          height=750,
+      )
+      if len(display_df) > 500:
+        st.caption(
+            " Отображены первые 500 строк. Скачайте Excel для получения полного"
+            " файла."
+        )
+    else:
+      st.info("Данные не найдены.")
+
+  # ==============================================================================
+  # СТРАНИЦА: CALENDAR (Матрица машин по датам)
+  # ==============================================================================
+  elif nav_page == "Calendar":
+    st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
+
+    if not filtered.empty:
+      # Подготавливаем формат часов с 2 знаками
+      pivot_df = filtered.copy()
+      pivot_df["formatted_hours"] = pivot_df["rest_before_shift_hours"].apply(
+          lambda x: f"{x:.2f}" if pd.notna(x) else ""
       )
 
-  if not render_df.empty:
-    styled_display = apply_table_styling(display_df.head(500))
-    
-    # Отображаем таблицу без скрытой колонки
-    st.dataframe(
-        styled_display.hide(subset=["_raw_rest_hours"], axis="columns") if "_raw_rest_hours" in display_df.columns else styled_display,
-        use_container_width=True,
-        hide_index=True,
-        height=750,
-    )
-    if len(render_df) > 500:
-      st.caption(
-          " Отображены первые 500 строк. Скачайте Excel для получения полного"
-          " файла."
+      # Если на одну дату у машины приходится несколько пауз, объединяем их через "/"
+      grouped_matrix = (
+          pivot_df.groupby(["vehicle_name", "date"])["formatted_hours"]
+          .apply(lambda x: " / ".join([str(v) for v in x if v != ""]))
+          .reset_index()
       )
-  else:
-    st.info("Данные не найдены.")
+
+      # Строим пивот-таблицу: строки — машины, столбцы — даты
+      calendar_table = grouped_matrix.pivot(
+          index="vehicle_name", columns="date", values="formatted_hours"
+      ).fillna("")
+
+      st.dataframe(calendar_table, use_container_width=True, height=750)
+    else:
+      st.info("Нет данных для отображения матрицы.")
 
 else:
   st.markdown(
