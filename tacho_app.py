@@ -472,22 +472,18 @@ if uploaded_file:
       | daily_df["rest_before_shift_hours"].isna()
   )
 
-  filtered = daily_df[mask].drop(columns=["dt_date"])
+  filtered = daily_df[mask].drop(columns=["dt_date"]).reset_index(drop=True)
 
   # ==============================================================================
   # СТРАНИЦА: MAIN
   # ==============================================================================
   if nav_page == "Main":
-    raw_rest_dict = filtered["rest_before_shift_hours"].to_dict()
-    fourth_flag_dict = filtered["is_fourth_9_11"].to_dict()
-    second_short_flag_dict = filtered["is_second_short_weekend"].to_dict()
-
     filtered_display = filtered.copy()
-    filtered_display["rest_before_shift_hours"] = filtered_display["rest_before_shift_hours"].apply(
+    filtered_display["rest_before_shift_hours_str"] = filtered_display["rest_before_shift_hours"].apply(
         lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
     )
 
-    display_df = filtered_display.drop(columns=["is_fourth_9_11", "is_second_short_weekend"]).rename(
+    display_df = filtered_display.drop(columns=["rest_before_shift_hours", "is_fourth_9_11", "is_second_short_weekend"]).rename(
         columns={
             "date": "Дата",
             "weekday": "День недели",
@@ -496,7 +492,7 @@ if uploaded_file:
             "vehicle_name": "Машина",
             "driver_name": "Водитель",
             "rest_country_before_shift": "Страна отдыха ДО смены",
-            "rest_before_shift_hours": "Отдых ДО смены (ч)",
+            "rest_before_shift_hours_str": "Отдых ДО смены (ч)",
             "pause_start": "Начало паузы",
             "pause_end": "Конец паузы",
         }
@@ -509,20 +505,21 @@ if uploaded_file:
         sub_dfs.append(sorted_sub)
       display_df = pd.concat(sub_dfs, ignore_index=True)
 
-    def apply_table_styling(df):
+    def apply_table_styling(df, raw_df):
       if df.empty:
         return df.style
 
       def style_specific_row_and_cell(row):
         styles = ['' for _ in row]
         idx = row.name
-        raw_val = raw_rest_dict.get(idx)
-        is_fourth = fourth_flag_dict.get(idx, False)
-        is_second_short = second_short_flag_dict.get(idx, False)
+        
+        # Безопасно извлекаем исходные данные по индексу текущей строки отфильтрованного DataFrame
+        raw_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
+        is_fourth = raw_df.loc[idx, "is_fourth_9_11"] if idx in raw_df.index else False
+        is_second_short = raw_df.loc[idx, "is_second_short_weekend"] if idx in raw_df.index else False
 
         is_rest_ge_24 = pd.notna(raw_val) and raw_val >= 24.0
         if is_rest_ge_24:
-          # Для больших пауз в основной таблице тоже применим темно-синий и жирный шрифт
           styles = ['background-color: #E0F2FE; font-weight: bold; color: #1E3A8A;' for _ in row]
 
         if 'Отдых ДО смены (ч)' in df.columns:
@@ -570,7 +567,7 @@ if uploaded_file:
         )
 
     if not display_df.empty:
-      styled_display = apply_table_styling(display_df.head(500))
+      styled_display = apply_table_styling(display_df.head(500), filtered)
       st.dataframe(
           styled_display,
           use_container_width=True,
