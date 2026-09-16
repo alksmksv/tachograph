@@ -418,31 +418,15 @@ if uploaded_file:
   )
 
   # --------------------------------------------------------------------------
-  # УРОВНИ СОРТИРОВКИ НАД ТАБЛИЦЕЙ
+  # СТРОГАЯ СОРТИРОВКА: МАШИНА ВСЕГДА ПЕРВАЯ
   # --------------------------------------------------------------------------
-  st.markdown("<div class='main-header'>Параметры сортировки таблицы</div>", unsafe_allow_html=True)
-  
-  sort_cols_options = [col for col in display_df.columns if col != "Машина"]
-  
-  col_s1, col_s2 = st.columns(2)
-  with col_s1:
-    sort_1 = st.selectbox("Сортировка 1-й очереди", options=sort_cols_options, index=0)
-  with col_s2:
-    sort_2 = st.selectbox("Сортировка 2-й очереди", options=["Нет"] + sort_cols_options, index=0)
-
-  # Формируем список сортировки: "Машина" ВСЕГДА первая для склейки машин
-  sorting_columns = ["Машина", sort_1]
-  ascending_flags = [True, True]
-
-  if sort_2 != "Нет" and sort_2 != sort_1:
-    sorting_columns.append(sort_2)
-    ascending_flags.append(True)
-
+  # Строки одной машины никогда не перемешаются с другими, так как 'Машина' идет первой.
+  # Внутри каждой машины строки упорядочиваются по дате смены.
   if not display_df.empty:
-    display_df = display_df.sort_values(by=sorting_columns, ascending=ascending_flags)
+    display_df = display_df.sort_values(by=["Машина", "Дата"], ascending=[True, True])
 
   # --------------------------------------------------------------------------
-  # СТИЛИЗАЦИЯ ТАБЛИЦЫ (Подсветка выходных и границы между машинами)
+  # СТИЛИЗАЦИЯ ТАБЛИЦЫ (Подсветка выходных и жирная граница между машинами)
   # --------------------------------------------------------------------------
   def apply_table_styling(df):
     if df.empty:
@@ -450,16 +434,14 @@ if uploaded_file:
 
     def style_rows(row):
       styles = ['' for _ in row]
-      
-      # 1. Подсветка выходных дней (Суббота / Воскресенье) светло-синим цветом
+      # Подсветка выходных дней (Суббота / Воскресенье) светло-синим цветом
       if row.get('День недели') in ['Суббота', 'Воскресенье']:
         styles = ['background-color: #E0F2FE' for _ in row]
-        
       return styles
 
     styler = df.style.apply(style_rows, axis=1)
     
-    # 2. Добавление жирной границы между разными машинами для визуального разделения
+    # Добавление жирной границы между разными машинами
     def highlight_borders(df_sub):
       css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
       cars = df_sub['Машина'].values
@@ -495,7 +477,6 @@ if uploaded_file:
       )
 
   if not display_df.empty:
-    # Применяем стилизатор для визуального разделения машин и подсветки выходных
     styled_display = apply_table_styling(display_df.head(500))
     
     st.dataframe(
