@@ -102,14 +102,13 @@ def get_rest_color(hours, is_fourth_restricted=False, is_second_short_weekend=Fa
   except:
     return ""
 
-  # Правило: от 9.0 ровно (включительно) до 11.0 (меньше)
   if 9.0 <= h < 11.0:
     if is_fourth_restricted:
-      return "background-color: #FEE2E2;"  # Светло-красный (4-я подряд пауза)
+      return "background-color: #FEE2E2;"  # Светло-красный
     return "background-color: #FEF9C3;"  # Светло-желтый
   elif 24.0 < h <= 45.0:
     if is_second_short_weekend:
-      return "background-color: #FEE2E2;"  # Светло-красный (вторая короткая недельная пауза подряд)
+      return "background-color: #FEE2E2;"  # Светло-красный (вторая короткая недельная пауза)
     return "background-color: #FFEDD5;"  # Светло-оранжевый
   elif h > 45.0:
     return "background-color: #DCFCE7;"  # Светло-зеленый
@@ -203,9 +202,7 @@ def process_file_fast(file_bytes, file_name):
   agg_df["pause_start"] = pd.to_datetime(agg_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
   agg_df["pause_end"] = pd.to_datetime(agg_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
 
-  # Подсчет для 4-й паузы (9.0 <= h < 11.0)
   is_fourth_flags = []
-  # Подсчет для второй короткой недельной паузы (24.0 < h <= 45.0)
   is_second_short_weekend_flags = []
 
   for _, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
@@ -219,7 +216,6 @@ def process_file_fast(file_bytes, file_name):
         is_second_short_weekend_flags.append((idx, False))
         continue
       
-      # Проверка 9.0 <= h < 11.0
       if h > 24.0:
         consecutive_9_11_count = 0
         is_fourth_flags.append((idx, False))
@@ -234,11 +230,10 @@ def process_file_fast(file_bytes, file_name):
         consecutive_9_11_count = 0
         is_fourth_flags.append((idx, False))
 
-      # Проверка второй короткой недельной паузы (24.0 < h <= 45.0)
       if 24.0 < h <= 45.0:
         if last_was_short_weekend:
           is_second_short_weekend_flags.append((idx, True))
-          last_was_short_weekend = False # сброс после срабатывания или считаем цепью? Пусть срабатывает на каждую вторую подряд
+          last_was_short_weekend = False
         else:
           is_second_short_weekend_flags.append((idx, False))
           last_was_short_weekend = True
@@ -442,7 +437,7 @@ if uploaded_file:
   )
 
   # ==============================================================================
-  # НАВИГАЦИЯ СВЕРХУ (Main / Calendar / Weekend Rest Calendar)
+  # НАВИГАЦИЯ СВЕРХУ
   # ==============================================================================
   nav_page = st.radio(
       "Навигация",
@@ -564,9 +559,7 @@ if uploaded_file:
             label="📥 Скачать Excel",
             data=excel_file,
             file_name="monitoring_smen.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
 
@@ -579,10 +572,7 @@ if uploaded_file:
           height=750,
       )
       if len(display_df) > 500:
-        st.caption(
-            " Отображены первые 500 строк. Скачайте Excel для получения полного"
-            " файла."
-        )
+        st.caption(" Отображены первые 500 строк. Скачайте Excel для получения полного файла.")
     else:
       st.info("Данные не найдены.")
 
@@ -675,98 +665,92 @@ if uploaded_file:
       st.info("Нет данных для отображения матрицы.")
 
   # ==============================================================================
-  # СТРАНИЦА: WEEKEND REST CALENDAR (Только паузы > 24 часов)
+  # СТРАНИЦА: WEEKEND REST CALENDAR (Матрица только для пауз > 24 часов)
   # ==============================================================================
   elif nav_page == "Weekend Rest Calendar":
-    st.markdown("<div class='main-header' style='margin-top: 15px;'>Weekend Rest Calendar (Паузы > 24 часов)</div>", unsafe_allow_html=True)
+    st.markdown("<div class='main-header' style='margin-top: 15px;'>Weekend Rest Calendar (Матрица паугов > 24ч)</div>", unsafe_allow_html=True)
 
     weekend_filtered = filtered[filtered["rest_before_shift_hours"] > 24.0].copy()
 
     if not weekend_filtered.empty:
-      raw_rest_dict_w = weekend_filtered["rest_before_shift_hours"].to_dict()
-      fourth_flag_dict_w = weekend_filtered["is_fourth_9_11"].to_dict()
-      second_short_flag_dict_w = weekend_filtered["is_second_short_weekend"].to_dict()
-
-      weekend_display = weekend_filtered.copy()
-      weekend_display["rest_before_shift_hours"] = weekend_display["rest_before_shift_hours"].apply(
-          lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+      pivot_df_w = weekend_filtered.copy()
+      pivot_df_w["formatted_hours"] = pivot_df_w["rest_before_shift_hours"].apply(
+          lambda x: f"{x:.2f}" if pd.notna(x) else ""
       )
 
-      display_w_df = weekend_display.drop(columns=["is_fourth_9_11", "is_second_short_weekend"]).rename(
-          columns={
-              "date": "Дата",
-              "weekday": "День недели",
-              "group": "Группа",
-              "vehicle_country": "Страна авто",
-              "vehicle_name": "Машина",
-              "driver_name": "Водитель",
-              "rest_country_before_shift": "Страна отдыха ДО смены",
-              "rest_before_shift_hours": "Отдых ДО смены (ч)",
-              "pause_start": "Начало паузы",
-              "pause_end": "Конец паузы",
-          }
+      grouped_matrix_w = (
+          pivot_df_w.groupby(["vehicle_name", "date"])
+          .agg({
+              "formatted_hours": lambda x: " / ".join([str(v) for v in x if v != ""]),
+              "is_fourth_9_11": "any",
+              "is_second_short_weekend": "any",
+              "rest_before_shift_hours": "max"
+          })
+          .reset_index()
       )
 
-      sub_dfs_w = []
-      for vehicle, group_df in display_w_df.groupby("Машина", sort=True):
-        sorted_sub = group_df.sort_values(by="Дата", ascending=True)
-        sub_dfs_w.append(sorted_sub)
-      display_w_df = pd.concat(sub_dfs_w, ignore_index=True)
+      calendar_table_w = grouped_matrix_w.pivot(
+          index="vehicle_name", columns="date", values="formatted_hours"
+      ).fillna("")
 
-      def apply_weekend_table_styling(df):
-        if df.empty:
-          return df.style
+      new_column_names_w = {}
+      for col in calendar_table_w.columns:
+        try:
+          dt = pd.to_datetime(col)
+          wd = dt.dayofweek
+          wd_map = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
+          suffix = f" [{wd_map[wd]}]"
+          if wd in [5, 6]:
+            suffix = f" 🔥{wd_map[wd]}"
+          new_column_names_w[col] = f"{col}{suffix}"
+        except:
+          pass
+      calendar_table_w = calendar_table_w.rename(columns=new_column_names_w)
 
-        def style_row_cell(row):
-          styles = ['' for _ in row]
-          idx = row.name
-          raw_val = raw_rest_dict_w.get(idx)
-          is_fourth = fourth_flag_dict_w.get(idx, False)
-          is_sec_short = second_short_flag_dict_w.get(idx, False)
+      fourth_matrix_w = grouped_matrix_w.pivot(
+          index="vehicle_name", columns="date", values="is_fourth_9_11"
+      ).fillna(False)
 
-          styles = ['background-color: #E0F2FE' for _ in row]
+      second_short_matrix_w = grouped_matrix_w.pivot(
+          index="vehicle_name", columns="date", values="is_second_short_weekend"
+      ).fillna(False)
 
-          if 'Отдых ДО смены (ч)' in df.columns:
-            col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
-            color_style = get_rest_color(raw_val, is_fourth_restricted=is_fourth, is_second_short_weekend=is_sec_short)
-            if color_style:
-              styles[col_idx] = color_style
+      hours_matrix_w = grouped_matrix_w.pivot(
+          index="vehicle_name", columns="date", values="rest_before_shift_hours"
+      )
 
-          return styles
-
-        styler = df.style.apply(style_row_cell, axis=1)
+      def style_calendar_cell_w(data):
+        df_styles = pd.DataFrame('', index=calendar_table_w.index, columns=calendar_table_w.columns)
         
-        def highlight_borders(df_sub):
-          css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
-          cars = df_sub['Машина'].values
-          for i in range(1, len(cars)):
-            if cars[i] != cars[i-1]:
-              css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
-          return css_styles
+        for orig_col, new_col in new_column_names_w.items():
+          try:
+            is_weekend = pd.to_datetime(orig_col).dayofweek in [5, 6]
+          except:
+            is_weekend = False
 
-        styler.apply(highlight_borders, axis=None)
-        return styler
+          for idx in calendar_table_w.index:
+            val = calendar_table_w.loc[idx, new_col]
+            is_fourth = fourth_matrix_w.loc[idx, orig_col] if orig_col in fourth_matrix_w.columns and idx in fourth_matrix_w.index else False
+            is_sec_short = second_short_matrix_w.loc[idx, orig_col] if orig_col in second_short_matrix_w.columns and idx in second_short_matrix_w.index else False
+            h_max = hours_matrix_w.loc[idx, orig_col] if orig_col in hours_matrix_w.columns and idx in hours_matrix_w.index else np.nan
 
-      col_hw, col_bw = st.columns([4, 1])
-      with col_hw:
-        st.markdown(f"<div style='font-size:13px; font-weight:600; color:#475569;'>Найдено смен с отдыхом > 24ч: {len(display_w_df)}</div>", unsafe_allow_html=True)
-      with col_bw:
-        excel_file_w = convert_df_to_excel(display_w_df)
-        st.download_button(
-            label="📥 Скачать Excel",
-            data=excel_file_w,
-            file_name="weekend_rest_calendar.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+            bg_style = ""
+            if val and not pd.isna(val):
+              bg_style = get_rest_color(h_max, is_fourth_restricted=is_fourth, is_second_short_weekend=is_sec_short)
+            
+            if is_weekend:
+              if not bg_style:
+                bg_style = "background-color: #F8FAFC;"
+              else:
+                bg_style += " border-right: 2px dashed #94A3B8; border-left: 2px dashed #94A3B8;"
 
-      styled_weekend = apply_weekend_table_styling(display_w_df)
-      st.dataframe(
-          styled_weekend,
-          use_container_width=True,
-          hide_index=True,
-          height=750,
-      )
+            if bg_style:
+              df_styles.loc[idx, new_col] = bg_style
+
+        return df_styles
+
+      styled_calendar_w = calendar_table_w.style.apply(style_calendar_cell_w, axis=None)
+      st.dataframe(styled_calendar_w, use_container_width=True, height=750)
     else:
       st.info("Нет данных с отдыхом более 24 часов по заданным фильтрам.")
 
