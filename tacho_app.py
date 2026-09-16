@@ -161,8 +161,11 @@ def process_file_fast(file_bytes, file_name):
 
   rest_before_hours = df[is_rest].groupby("shift_id")["rest_hours"].first()
   rest_before_country = df[is_rest].groupby("shift_id")["rest_country"].first()
-  pause_start_before = df[is_rest].groupby("shift_id"]["pause_start_dt"].first()
-  pause_end_before = df[is_rest].groupby("shift_id"]["pause_end_dt"].first()
+  
+  # Исправленные строки с корректными скобками
+  rest_filtered = df[is_rest]
+  pause_start_before = rest_filtered.groupby("shift_id")["pause_start_dt"].first()
+  pause_end_before = rest_filtered.groupby("shift_id")["pause_end_dt"].first()
 
   work_df = df[~is_rest].copy()
   if work_df.empty:
@@ -580,7 +583,6 @@ if uploaded_file:
           index="vehicle_name", columns="date", values="formatted_hours"
       ).fillna("")
 
-      # Добавляем дни недели в заголовки столбцов дат
       new_column_names = {}
       for col in calendar_table.columns:
         try:
