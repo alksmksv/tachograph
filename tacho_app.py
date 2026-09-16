@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(layout="wide", page_title="Мониторинг смен")
 
 # ==============================================================================
-# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI И ВЫДЕЛЕНИЕ БОЛЬШИХ ПАУЗ
+# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI И ВЫДЕЛЕНИЕ ПАУЗ
 # ==============================================================================
 st.markdown(
     """
@@ -104,13 +104,13 @@ def get_rest_color(hours, is_fourth_restricted=False, is_second_short_weekend=Fa
 
   if 9.0 <= h < 11.0:
     if is_fourth_restricted:
-      return "background-color: #FEE2E2;"  # Светло-красный
+      return "background-color: #FEE2E2;"  # Светло-красный (4-я и более подряд)
     return "background-color: #FEF9C3;"  # Светло-желтый
-  elif 24.0 < h <= 45.0:
+  elif 24.0 <= h < 45.0:  # Короткий выходной
     if is_second_short_weekend:
-      return "background-color: #FEE2E2;"  # Светло-красный
-    return "background-color: #FFEDD5;"  # Светло-оранжевый
-  elif h > 45.0:
+      return "background-color: #FEE2E2;"  # Светло-красный (2-й и более подряд после >=45)
+    return "background-color: #FEF9C3;"  # Светло-желтый
+  elif h >= 45.0:
     return "background-color: #DCFCE7;"  # Светло-зеленый
   return ""
 
@@ -207,7 +207,7 @@ def process_file_fast(file_bytes, file_name):
 
   for _, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
     consecutive_9_11_count = 0
-    last_was_short_weekend = False
+    short_weekend_streak = 0
 
     for idx, row in v_group.iterrows():
       h = row["rest_before_shift_hours"]
@@ -216,31 +216,35 @@ def process_file_fast(file_bytes, file_name):
         is_second_short_weekend_flags.append((idx, False))
         continue
       
-      if h > 24.0:
+      # Логика для 9-11 часов (короткие смены)
+      if h >= 11.0:
         consecutive_9_11_count = 0
         is_fourth_flags.append((idx, False))
       elif 9.0 <= h < 11.0:
-        if consecutive_9_11_count == 3:
+        if consecutive_9_11_count >= 3: # 4-я и более
           is_fourth_flags.append((idx, True))
-          consecutive_9_11_count = 0 
         else:
-          consecutive_9_11_count += 1
           is_fourth_flags.append((idx, False))
+        consecutive_9_11_count += 1
       else:
         consecutive_9_11_count = 0
         is_fourth_flags.append((idx, False))
 
-      if 24.0 < h <= 45.0:
-        if last_was_short_weekend:
+      # Логика для 24-45 часов (длинные смены/выходные)
+      if h >= 45.0:
+        short_weekend_streak = 0
+        is_second_short_weekend_flags.append((idx, False))
+      elif 24.0 <= h < 45.0:
+        short_weekend_streak += 1
+        if short_weekend_streak >= 2: # 2-й и более подряд после >=45
           is_second_short_weekend_flags.append((idx, True))
-          last_was_short_weekend = False
         else:
           is_second_short_weekend_flags.append((idx, False))
-          last_was_short_weekend = True
-      elif h > 45.0:
-        last_was_short_weekend = False
-        is_second_short_weekend_flags.append((idx, False))
       else:
+        # Если пауза меньше 24 (например, 9-11 или другая), сбрасывать ли цепочку коротких выходных?
+        # По логике обычно сбрасывается или прерывается, обнулим на всякий случай, кроме случаев нормального продолжения
+        if h < 9.0:
+          short_weekend_streak = 0
         is_second_short_weekend_flags.append((idx, False))
 
   fourth_dict = dict(is_fourth_flags)
@@ -437,7 +441,7 @@ if uploaded_file:
   )
 
   # ==============================================================================
-  # НАВИГАЦИЯ СВЕРХУ (Осталось только 2 вкладки)
+  # НАВИГАЦИЯ СВЕРХУ
   # ==============================================================================
   nav_page = st.radio(
       "Навигация",
