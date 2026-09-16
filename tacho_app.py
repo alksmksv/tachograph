@@ -241,8 +241,6 @@ def process_file_fast(file_bytes, file_name):
         else:
           is_second_short_weekend_flags.append((idx, False))
       else:
-        # Если пауза меньше 24 (например, 9-11 или другая), сбрасывать ли цепочку коротких выходных?
-        # По логике обычно сбрасывается или прерывается, обнулим на всякий случай, кроме случаев нормального продолжения
         if h < 9.0:
           short_weekend_streak = 0
         is_second_short_weekend_flags.append((idx, False))
@@ -524,13 +522,17 @@ if uploaded_file:
 
         is_rest_ge_24 = pd.notna(raw_val) and raw_val >= 24.0
         if is_rest_ge_24:
-          styles = ['background-color: #E0F2FE' for _ in row]
+          # Для больших пауз в основной таблице тоже применим темно-синий и жирный шрифт
+          styles = ['background-color: #E0F2FE; font-weight: bold; color: #1E3A8A;' for _ in row]
 
         if 'Отдых ДО смены (ч)' in df.columns:
           col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
           color_style = get_rest_color(raw_val, is_fourth_restricted=is_fourth, is_second_short_weekend=is_second_short)
           if color_style:
-            styles[col_idx] = color_style
+            if is_rest_ge_24:
+              styles[col_idx] = color_style + " font-weight: bold; color: #1E3A8A;"
+            else:
+              styles[col_idx] = color_style
           elif not is_rest_ge_24:
             styles[col_idx] = ''
 
@@ -652,12 +654,12 @@ if uploaded_file:
             if val and not pd.isna(val):
               bg_style = get_rest_color(h_max, is_fourth_restricted=is_fourth, is_second_short_weekend=is_sec_short)
             
-            # Жирное выделение и увеличенный шрифт для больших пауз (от 24 часов)
+            # Для больших пауз (от 24 часов): жирный шрифт, увеличенный кегль (13px) и темно-синий цвет (#1E3A8A)
             if not pd.isna(h_max) and h_max >= 24.0:
               if bg_style:
-                bg_style += " font-weight: bold; font-size: 13px;"
+                bg_style += " font-weight: bold; font-size: 13px; color: #1E3A8A;"
               else:
-                bg_style = "font-weight: bold; font-size: 13px;"
+                bg_style = "font-weight: bold; font-size: 13px; color: #1E3A8A;"
 
             if is_weekend:
               if not bg_style:
