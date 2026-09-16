@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(layout="wide", page_title="Мониторинг смен")
 
 # ==============================================================================
-# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI, ЖИРНЫЕ ГРАНИЦЫ И ПОДСВЕТКА ВЫХОДНЫХ
+# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI, ЖИРНЫЕ ГРАНИЦЫ И ПОДСВЕТКА ПАУЗ > 24Ч
 # ==============================================================================
 st.markdown(
     """
@@ -138,7 +138,7 @@ def process_file_fast(file_bytes, file_name):
   df["shift_id"] = (is_rest | change_group).cumsum()
 
   # Запоминаем часы отдыха, страну отдыха, а также начало и конец паузы (до смены)
-  df["rest_hours"] = np.where(is_rest, (dur_min / 60).round(2), np.nan)
+  df["rest_hours"] = np.where(is_rest, (dur_min / 60), np.nan)
   df["rest_country"] = np.where(is_rest, df["country"], np.nan)
   df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
   df["pause_end_dt"] = np.where(is_rest, df["end_datetime"], pd.NaT)
@@ -161,10 +161,10 @@ def process_file_fast(file_bytes, file_name):
   agg_df["dt_date"] = agg_df["shift_start"].dt.date
   agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
 
-  # День недели выбранной даты (на русском)
+  # День недели выбранной даты (сокращенный формат на русском)
   days_ru = {
-      0: "Понедельник", 1: "Вторник", 2: "Среда", 
-      3: "Четверг", 4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+      0: "ПН", 1: "ВТ", 2: "СР", 
+      3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"
   }
   agg_df["weekday"] = agg_df["shift_start"].dt.dayofweek.map(days_ru)
 
@@ -304,7 +304,7 @@ if uploaded_file:
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
     return selected
 
-  # Рендер селекторов (включая фильтр по группам)
+  # Рендер селекторов
   selected_vehicle_countries = render_select_filter(
       "Страна авто", ["CZ", "SK", "Other"], "v_countries"
   )
@@ -402,6 +402,14 @@ if uploaded_file:
 
   filtered = daily_df[mask].drop(columns=["dt_date"])
 
+  # Сохраняем «сырые» часы отдыха для проверки условия > 24 перед окружением в строку
+  filtered["_raw_rest_hours"] = filtered["rest_before_shift_hours"]
+
+  # Округляем часы отдыха до 2 знаков после запятой для вывода
+  filtered["rest_before_shift_hours"] = filtered["rest_before_shift_hours"].apply(
+      lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+  )
+
   display_df = filtered.rename(
       columns={
           "date": "Дата",
@@ -422,17 +430,14 @@ if uploaded_file:
   # --------------------------------------------------------------------------
   if not display_df.empty:
     sub_dfs = []
-    # Сортируем названия машин просто для детерминированного порядка блоков
     for vehicle, group_df in display_df.groupby("Машина", sort=True):
-      # 1. Каждая машина сортируется внутри себя (например, по дате)
       sorted_sub = group_df.sort_values(by="Дата", ascending=True)
       sub_dfs.append(sorted_sub)
     
-    # 2. Аппендим (склеиваем) мини-таблицы в единый датафрейм без последующей сортировки
     display_df = pd.concat(sub_dfs, ignore_index=True)
 
   # --------------------------------------------------------------------------
-  # СТИЛИЗАЦИЯ ЕДИНОЙ ТАБЛИЦЫ (Подсветка выходных и жирная граница между машинами)
+  # СТИЛИЗАЦИЯ ЕДИНОЙ ТАБЛИЦЫ (Подсветка паузы > 24ч и жирная граница между машинами)
   # --------------------------------------------------------------------------
   def apply_table_styling(df):
     if df.empty:
@@ -440,8 +445,9 @@ if uploaded_file:
 
     def style_rows(row):
       styles = ['' for _ in row]
-      # Подсветка выходных дней (Суббота / Воскресенье) светло-синим цветом
-      if row.get('День недели') in ['Суббота', 'Воскресенье']:
+      raw_val = row.get('_raw_rest_hours')
+      # Подсветка синим цветом, если пауза строго больше 24 часов
+      if pd.notna(raw_val) and raw_val > 24.0:
         styles = ['background-color: #E0F2FE' for _ in row]
       return styles
 
@@ -459,6 +465,9 @@ if uploaded_file:
     styler.apply(highlight_borders, axis=None)
     return styler
 
+  # Удаляем временную колонку `_raw_rest_hours` перед отображением (оставляем её для стилизации)
+  render_df = display_df.drop(columns=["_raw_rest_hours"], errors="ignore")
+
   # --------------------------------------------------------------------------
   # ВЫВОД ЗАГОЛОВКА И ТАБЛИЦЫ
   # --------------------------------------------------------------------------
@@ -466,12 +475,12 @@ if uploaded_file:
   with col_h:
     st.markdown(
         "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
-        f" {len(display_df)})</div>",
+        f" {len(render_df)})</div>",
         unsafe_allow_html=True,
     )
   with col_b:
-    if not display_df.empty:
-      excel_file = convert_df_to_excel(display_df)
+    if not render_df.empty:
+      excel_file = convert_df_to_excel(render_df)
       st.download_button(
           label="📥 Скачать Excel",
           data=excel_file,
@@ -482,16 +491,17 @@ if uploaded_file:
           use_container_width=True,
       )
 
-  if not display_df.empty:
+  if not render_df.empty:
     styled_display = apply_table_styling(display_df.head(500))
     
+    # Отображаем таблицу без скрытой колонки
     st.dataframe(
-        styled_display,
+        styled_display.hide(subset=["_raw_rest_hours"], axis="columns") if "_raw_rest_hours" in display_df.columns else styled_display,
         use_container_width=True,
         hide_index=True,
         height=750,
     )
-    if len(display_df) > 500:
+    if len(render_df) > 500:
       st.caption(
           " Отображены первые 500 строк. Скачайте Excel для получения полного"
           " файла."
