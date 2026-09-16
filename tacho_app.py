@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(layout="wide", page_title="Мониторинг смен")
 
 # ==============================================================================
-# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI
+# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI, ЖИРНЫЕ ГРАНИЦЫ И ПОДСВЕТКА ВЫХОДНЫХ
 # ==============================================================================
 st.markdown(
     """
@@ -21,7 +21,7 @@ st.markdown(
         padding: 0.4rem !important;
     }
 
-    /* Уменьшенные карточки фильтров */
+    /* Уменьшенные карточки фильтров (единый стиль для всех) */
     .filter-card {
         border: 1px solid #CBD5E1;
         background-color: #F8FAFC;
@@ -38,7 +38,7 @@ st.markdown(
 
     /* Синие компактные блоки выбранных значений в multiselect */
     [data-baseweb="tag"] {
-        background-color: #2563EB !important; /* Насыщенный синий */
+        background-color: #2563EB !important;
         border-radius: 3px !important;
         height: 18px !important;
         margin: 1px !important;
@@ -51,7 +51,7 @@ st.markdown(
         font-size: 10px !important;
     }
 
-    /* Компактный размер инпутов и селектов */
+    /* Единый компактный размер инпутов, селектов и мультиселектов */
     div[data-baseweb="select"] > div, 
     div[data-testid="stNumberInput"] input,
     div[data-testid="stDateInput"] input {
@@ -304,7 +304,7 @@ if uploaded_file:
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
     return selected
 
-  # Рендер селекторов
+  # Рендер селекторов (включая фильтр по группам)
   selected_vehicle_countries = render_select_filter(
       "Страна авто", ["CZ", "SK", "Other"], "v_countries"
   )
@@ -430,7 +430,7 @@ if uploaded_file:
   with col_s2:
     sort_2 = st.selectbox("Сортировка 2-й очереди", options=["Нет"] + sort_cols_options, index=0)
 
-  # Формируем список сортировки: "Машина" ВСЕГДА первая, чтобы строки одной машины были рядом
+  # Формируем список сортировки: "Машина" ВСЕГДА первая для склейки машин
   sorting_columns = ["Машина", sort_1]
   ascending_flags = [True, True]
 
@@ -440,6 +440,36 @@ if uploaded_file:
 
   if not display_df.empty:
     display_df = display_df.sort_values(by=sorting_columns, ascending=ascending_flags)
+
+  # --------------------------------------------------------------------------
+  # СТИЛИЗАЦИЯ ТАБЛИЦЫ (Подсветка выходных и границы между машинами)
+  # --------------------------------------------------------------------------
+  def apply_table_styling(df):
+    if df.empty:
+      return df.style
+
+    def style_rows(row):
+      styles = ['' for _ in row]
+      
+      # 1. Подсветка выходных дней (Суббота / Воскресенье) светло-синим цветом
+      if row.get('День недели') in ['Суббота', 'Воскресенье']:
+        styles = ['background-color: #E0F2FE' for _ in row]
+        
+      return styles
+
+    styler = df.style.apply(style_rows, axis=1)
+    
+    # 2. Добавление жирной границы между разными машинами для визуального разделения
+    def highlight_borders(df_sub):
+      css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
+      cars = df_sub['Машина'].values
+      for i in range(1, len(cars)):
+        if cars[i] != cars[i-1]:
+          css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
+      return css_styles
+
+    styler.apply(highlight_borders, axis=None)
+    return styler
 
   # --------------------------------------------------------------------------
   # ВЫВОД ЗАГОЛОВКА И ТАБЛИЦЫ
@@ -465,8 +495,11 @@ if uploaded_file:
       )
 
   if not display_df.empty:
+    # Применяем стилизатор для визуального разделения машин и подсветки выходных
+    styled_display = apply_table_styling(display_df.head(500))
+    
     st.dataframe(
-        display_df.head(500),
+        styled_display,
         use_container_width=True,
         hide_index=True,
         height=750,
