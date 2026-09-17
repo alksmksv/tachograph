@@ -242,11 +242,10 @@ def process_file_fast(file_bytes, file_name):
                 if is_weekend_end:
                     color_type = "red"
                 else:
-                    # Проверяем возможность компенсации 11+h в будни (если долг возник строго с предшествующих выходных впритык)
                     can_compensate_weekday = False
                     if active_debts:
                         oldest_debt = active_debts[0]
-                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2) # СБ-ВС предыдущей недели
+                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
                         if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
                             can_compensate_weekday = True
 
@@ -260,7 +259,7 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45
+            # 3. Диапазон 24 <= h < 45 (Сокращенный еженедельный отдых -> Синий, так как > 24ч)
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -273,10 +272,9 @@ def process_file_fast(file_bytes, file_name):
                 if recent_short_count >= 2:
                     color_type = "red"
                 else:
-                    color_type = "yellow"
+                    color_type = "blue"
                     debt_val = 45.0 - h
                     expiry_dt = shift_dt + pd.Timedelta(days=21)
-                    # Фиксируем дату окончания выходных, на которых возник долг
                     weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
                     active_debts.append({
                         "debt_hours": debt_val, 
@@ -665,11 +663,9 @@ if uploaded_file:
                         is_weekend = False
 
                     for idx in calendar_table.index:
-                        c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in color_matrix.index else ""
+                        c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in calendar_table.index else ""
                         
-                        # Правило для Календаря: для остальных ячеек (если это не Отдых ДО смены, либо по общему правилу)
-                        # Здесь для Календаря сохраняется полная логика статус-цветов, но если нужно правило >24ч синим для ячеек без цвета:
-                        h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in hours_matrix.index else np.nan
+                        h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in calendar_table.index else np.nan
                         
                         bg_style = get_cell_style(c_type)
                         if not bg_style and pd.notna(h_val) and h_val > 24.0:
