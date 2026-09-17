@@ -212,10 +212,8 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
+            # Сначала убираем просроченные долги
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
-            
-            current_debt_val = round(sum(d["debt_hours"] for d in active_debts), 2)
-            row["debt_balance"] = float(current_debt_val)
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
@@ -225,6 +223,8 @@ def process_file_fast(file_bytes, file_name):
                 row["status_color"] = ""
                 row["display_text"] = ""
                 row["violation_description"] = ""
+                # Долг до компенсации тянется, если он есть
+                row["debt_balance"] = float(sum(d["debt_hours"] for d in active_debts))
                 processed_rows.append(row)
                 continue
 
@@ -264,7 +264,7 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "green"
                     display_str = f"11+{extra_h:.2f}"
                     violation_desc = "Компенсация долга"
-                    active_debts.pop(0)
+                    active_debts.pop(0)  # Погасили долг -> в этот день баланс станет 0 (или оставшиеся долги)
                 else:
                     color_type = ""
                     violation_desc = ""
@@ -288,6 +288,8 @@ def process_file_fast(file_bytes, file_name):
                 debt_val = 45.0 - h
                 expiry_dt = shift_dt + pd.Timedelta(days=21)
                 weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                
+                # Добавляем долг
                 active_debts.append({
                     "debt_hours": debt_val, 
                     "expiry_date": expiry_dt,
@@ -303,7 +305,7 @@ def process_file_fast(file_bytes, file_name):
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
                         violation_desc = "Компенсация долга"
-                        active_debts.pop(0)
+                        active_debts.pop(0)  # Погасили долг
                     else:
                         color_type = "blue"
                         violation_desc = ""
@@ -311,7 +313,13 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "blue"
                     violation_desc = ""
 
+            # Актуализируем просрочки еще раз
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
+
+            # Баланс долга на текущую строку: 
+            # Если это день компенсации, то погашенный долг уже убран из active_debts, 
+            # поэтому для этого дня отобразится остаток (0, если закрыли всё, или оставшийся хвост).
+            row["debt_balance"] = float(sum(d["debt_hours"] for d in active_debts))
 
             row["status_color"] = color_type
             row["display_text"] = display_str
@@ -392,6 +400,7 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
+    # Для фильтра "Только машины с долгом" проверяем актуальный долг на последнюю запись
     latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
     vehicles_with_violations = daily_df[daily_df["status_color"] == "red"]["vehicle_name"].unique().tolist()
@@ -717,7 +726,10 @@ if uploaded_file:
                 index="vehicle_name", columns="date", values="max_hours"
             )
 
-            latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
+            # Для матрицы календаря берем текущий/последний актуальный долг на каждый день из ежедневного расчета
+            calendar_debt_matrix = daily_df.pivot(
+                index="vehicle_name", columns="date", values="debt_balance"
+            ).fillna(0.0)
             
             display_calendar = text_matrix.copy()
             for col in hours_matrix.columns:
@@ -729,6 +741,8 @@ if uploaded_file:
                     else:
                         display_calendar.loc[idx, col] = ""
 
+            # В календарной матрице добавляем колонку актуального долга на текущую дату / последнюю запись
+            latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
             display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0)
             display_calendar["Компенсация"] = display_calendar["Компенсация"].apply(lambda x: f"{x:.2f}")
 
