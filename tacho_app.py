@@ -96,9 +96,9 @@ st.markdown(
 # ==============================================================================
 def get_cell_style(color_type):
     if color_type == "blue":
-        return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"  # Синий (Выходной / Норма)
+        return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"  # Синий (Выходной / Норма >=45ч)
     elif color_type == "yellow":
-        return "background-color: #FEF9C3; color: #713F12;"  # Желтый (Сокращение / Предупреждение)
+        return "background-color: #FEF9C3; color: #713F12;"  # Желтый (Сокращенный отдых 24-45ч)
     elif color_type == "green":
         return "background-color: #DCFCE7; font-weight: bold; color: #166534;"  # Зеленый (Успешная компенсация)
     elif color_type == "red":
@@ -199,7 +199,7 @@ def process_file_fast(file_bytes, file_name):
     for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
         v_group = v_group.reset_index(drop=True)
         
-        active_debts = []  # Накопленные долги (непрерывное покрытие)
+        active_debts = []  # Накопленные долги за сокращенные еженедельные паузы
         
         for idx, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
@@ -207,22 +207,7 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Определяем, выпадает ли пауза на выходные (Сб/Вс) или заканчивается в ВС/ПН
-            is_weekend_rest = False
-            ends_on_bound = False
-            if pd.notna(p_start) and pd.notna(p_end):
-                curr_d = p_start.normalize()
-                while curr_d <= p_end.normalize():
-                    if curr_d.dayofweek in [5, 6]:
-                        is_weekend_rest = True
-                        break
-                    curr_d += pd.Timedelta(days=1)
-                
-                # Недельная пауза должна заканчиваться в понедельник или воскресенье
-                if p_end.dayofweek in [0, 6]:
-                    ends_on_bound = True
-
-            color_type = ""  # По умолчанию будние и пустые без выделения
+            color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
             
             if pd.isna(h):
@@ -231,29 +216,26 @@ def process_file_fast(file_bytes, file_name):
                 processed_rows.append(row)
                 continue
 
-            # Проверка: будни vs выходные
-            if not is_weekend_rest:
-                # БУДНИЕ ДНИ
+            # ПРОВЕРКА ПО МАРКЕРУ ДНЯ ОКОНЧАНИЯ ПАУЗЫ (ВС = 6 или ПН = 0)
+            is_weekly_rest = False
+            if pd.notna(p_end):
+                if p_end.dayofweek in [0, 6]:  # Заканчивается в понедельник или воскресенье
+                    is_weekly_rest = True
+
+            if not is_weekly_rest:
+                # --- БУДНИЕ ДНИ / МЕЖСМЕННЫЙ ОТДЫХ (заканчивается со ВТ по СБ) ---
                 if h < 9.0:
                     color_type = "red"  # Нарушение (<9 часов)
                 elif 9.0 <= h < 11.0:
+                    # Проверка на количество сокращенных суточных за неделю (не более 3)
                     w_start = row["week_start"]
                     week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
                     short_weekday_count_prior = 0
-                    for p_idx, p_row in v_group[week_shifts_mask].iterrows():
+                    for _, p_row in v_group[week_shifts_mask].iterrows():
                         ph = p_row["rest_before_shift_hours"]
-                        ps = p_row["pause_start"]
                         pe = p_row["pause_end"]
                         if pd.notna(ph) and 9.0 <= ph < 11.0:
-                            is_wkend = False
-                            if pd.notna(ps) and pd.notna(pe):
-                                cd = ps.normalize()
-                                while cd <= pe.normalize():
-                                    if cd.dayofweek in [5, 6]:
-                                        is_wkend = True
-                                        break
-                                    cd += pd.Timedelta(days=1)
-                            if not is_wkend:
+                            if pd.isna(pe) or pe.dayofweek not in [0, 6]:
                                 short_weekday_count_prior += 1
                     
                     if short_weekday_count_prior >= 3:
@@ -261,42 +243,20 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = "yellow"
                 else:
-                    # >= 11 часов на буднях. Проверяем погашение долга (непрерывно)
-                    if active_debts:
-                        oldest_debt = active_debts[0]
-                        required_hours = 11.0 + oldest_debt["debt_hours"]
-                        if h >= required_hours:
-                            H = h - 11.0
-                            color_type = "green"
-                            display_str = f"11+{H:.2f}"
-                            active_debts.pop(0)  # Долг полностью погашен непрерывной компенсацией
-                        else:
-                            color_type = ""  # Обычный будний день без подсветки, долг не перекрыт целиком
-                    else:
-                        color_type = ""
+                    # Полноценный суточный отдых (>= 11 часов) в будни
+                    color_type = ""
             else:
-                # ВЫХОДНЫЕ / ЕЖЕНЕДЕЛЬНЫЕ ПАУЗЫ
+                # --- ЕЖЕНЕДЕЛЬНЫЙ ОТДЫХ (заканчивается в ВС или ПН) ---
                 if h < 24.0:
-                    color_type = "red"  # Нарушение (меньше 24 часов)
+                    color_type = "red"  # Грубое нарушение еженедельного отдыха (< 24 часов)
                 elif 24.0 <= h < 45.0:
-                    # Проверка границ недели: еженедельная пауза не должна обрываться посреди недели некорректно
-                    window_start = shift_dt - pd.Timedelta(days=28)
-                    window_mask = (v_group["shift_start"] >= window_start) & (v_group["shift_start"] < shift_dt) & (v_group.index < idx)
-                    short_wkend_count = 0
-                    for p_idx, p_row in v_group[window_mask].iterrows():
-                        ph = p_row["rest_before_shift_hours"]
-                        if pd.notna(ph) and 24.0 <= ph < 45.0:
-                            short_wkend_count += 1
-                    
-                    if short_wkend_count >= 2:
-                        color_type = "red"
-                    else:
-                        color_type = "yellow"
-                        debt_val = 45.0 - h
-                        expiry_dt = shift_dt + pd.Timedelta(days=28)
-                        active_debts.append({"debt_hours": debt_val, "expiry_date": expiry_dt})
+                    # Сокращенный еженедельный отдых (24 - 45 часов) -> Желтый + фиксация долга
+                    color_type = "yellow"
+                    debt_val = 45.0 - h
+                    expiry_dt = shift_dt + pd.Timedelta(days=21) # Компенсация в течение 3 недель
+                    active_debts.append({"debt_hours": debt_val, "expiry_date": expiry_dt})
                 else:
-                    # >= 45 часов (полноценный отдых / компенсация)
+                    # Полноценный еженедельный отдых >= 45 часов (в т.ч. заканчивающийся в понедельник). Проверяем погашение долга
                     if active_debts:
                         oldest_debt = active_debts[0]
                         required_hours = 45.0 + oldest_debt["debt_hours"]
@@ -304,11 +264,11 @@ def process_file_fast(file_bytes, file_name):
                             H = h - 45.0
                             color_type = "green"
                             display_str = f"45+{H:.2f}"
-                            active_debts.pop(0)  # Компенсация засчитана непрерывно
+                            active_debts.pop(0)  # Долг успешно погашен единой компенсацией
                         else:
-                            color_type = "blue"  # Норма выходного синяя, но долг не закрыт полностью
+                            color_type = "blue"  # Качественный выходной, но долг еще не покрыт полностью
                     else:
-                        color_type = "blue"  # Обычный полноценный выходной — синий
+                        color_type = "blue"  # Обычный полноценный выходной
 
             # Очищаем просроченные долги
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
