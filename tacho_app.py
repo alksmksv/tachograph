@@ -263,36 +263,61 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "green"
                     display_str = f"11+{extra_h:.2f}"
                     violation_desc = "Компенсация долга"
-                    active_debts.pop(0)  # Погасили долг -> в этот день баланс сбрасывается в 0 (или остаток)
+                    active_debts.pop(0)  
                 else:
                     color_type = ""
                     violation_desc = ""
 
             elif 24.0 <= h < 45.0:
-                four_weeks_ago = shift_dt - pd.Timedelta(days=28)
-                recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
-                recent_short_count = 0
-                for _, p_row in v_group[recent_mask].iterrows():
-                    ph = p_row["rest_before_shift_hours"]
-                    if pd.notna(ph) and 24.0 <= ph < 45.0:
-                        recent_short_count += 1
+                # Проверяем день окончания: если это Вт, Ср, Чт, Пт, Сб (индексы 1, 2, 3, 4, 5)
+                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
 
-                if recent_short_count >= 2:
-                    color_type = "red"
-                    violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели"
+                if is_midweek_end:
+                    # По правилу: пауза в середине недели не считается еженедельной -> не добавляет долг, но может компенсировать прежний как 11+h
+                    can_compensate = False
+                    if active_debts:
+                        oldest_debt = active_debts[0]
+                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
+                        if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
+                            can_compensate = True
+
+                    req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate) else 0)
+
+                    if active_debts and can_compensate and h >= req_h:
+                        extra_h = h - 11.0
+                        color_type = "green"
+                        display_str = f"11+{extra_h:.2f}"
+                        violation_desc = "Компенсация долга (среденедельная пауза)"
+                        active_debts.pop(0)
+                    else:
+                        color_type = "orange"
+                        violation_desc = "Сокращенная еженедельная пауза (середина недели, без долга)"
                 else:
-                    color_type = "orange"
-                    violation_desc = "Сокращенная еженедельная пауза"
+                    # Стандартная сокращенная еженедельная пауза (заканчивается в Пн или Вс)
+                    four_weeks_ago = shift_dt - pd.Timedelta(days=28)
+                    recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
+                    recent_short_count = 0
+                    for _, p_row in v_group[recent_mask].iterrows():
+                        ph = p_row["rest_before_shift_hours"]
+                        if pd.notna(ph) and 24.0 <= ph < 45.0:
+                            recent_short_count += 1
 
-                debt_val = 45.0 - h
-                expiry_dt = shift_dt + pd.Timedelta(days=21)
-                weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
-                
-                active_debts.append({
-                    "debt_hours": debt_val, 
-                    "expiry_date": expiry_dt,
-                    "source_weekend_end": weekend_end_ref
-                })
+                    if recent_short_count >= 2:
+                        color_type = "red"
+                        violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели"
+                    else:
+                        color_type = "orange"
+                        violation_desc = "Сокращенная еженедельная пауза"
+
+                    debt_val = 45.0 - h
+                    expiry_dt = shift_dt + pd.Timedelta(days=21)
+                    weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                    
+                    active_debts.append({
+                        "debt_hours": debt_val, 
+                        "expiry_date": expiry_dt,
+                        "source_weekend_end": weekend_end_ref
+                    })
 
             elif h >= 45.0:
                 if active_debts:
@@ -303,7 +328,7 @@ def process_file_fast(file_bytes, file_name):
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
                         violation_desc = "Компенсация долга"
-                        active_debts.pop(0)  # Погасили долг
+                        active_debts.pop(0)  
                     else:
                         color_type = "blue"
                         violation_desc = ""
@@ -313,7 +338,6 @@ def process_file_fast(file_bytes, file_name):
 
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
 
-            # Баланс долга: в день компенсации долг уже pop'нулся, поэтому здесь отразится 0 (или остаток)
             row["debt_balance"] = float(sum(d["debt_hours"] for d in active_debts))
 
             row["status_color"] = color_type
@@ -719,7 +743,6 @@ if uploaded_file:
                 index="vehicle_name", columns="date", values="max_hours"
             )
 
-            # Безопасная агрегация долгов перед pivot (устраняет дубликаты строк по датам)
             debt_grouped = (
                 daily_df.groupby(["vehicle_name", "date"])["debt_balance"]
                 .last()
@@ -777,7 +800,7 @@ if uploaded_file:
                         continue
 
                     for idx in display_calendar.index:
-                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in color_matrix.index else ""
+                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in display_calendar.index else ""
                         orig_col_key = [k for k, v in new_column_names.items() if v == new_col]
                         h_val = hours_matrix.loc[idx, orig_col_key[0]] if orig_col_key and idx in hours_matrix.index and orig_col_key[0] in hours_matrix.columns else np.nan
                         
