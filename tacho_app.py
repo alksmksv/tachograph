@@ -259,7 +259,7 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45 (Сокращенный еженедельный отдых -> Синий)
+            # 3. Диапазон 24 <= h < 45 (Желтый для 1-го и 2-го в рамках 4 недель, Красный для 3-го)
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -272,17 +272,18 @@ def process_file_fast(file_bytes, file_name):
                 if recent_short_count >= 2:
                     color_type = "red"
                 else:
-                    color_type = "blue"
-                    debt_val = 45.0 - h
-                    expiry_dt = shift_dt + pd.Timedelta(days=21)
-                    weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
-                    active_debts.append({
-                        "debt_hours": debt_val, 
-                        "expiry_date": expiry_dt,
-                        "source_weekend_end": weekend_end_ref
-                    })
+                    color_type = "yellow"
 
-            # 4. Диапазон h >= 45
+                debt_val = 45.0 - h
+                expiry_dt = shift_dt + pd.Timedelta(days=21)
+                weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                active_debts.append({
+                    "debt_hours": debt_val, 
+                    "expiry_date": expiry_dt,
+                    "source_weekend_end": weekend_end_ref
+                })
+
+            # 4. Диапазон h >= 45 (Синий, либо Зеленый при компенсации 45+h)
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
@@ -563,8 +564,7 @@ if uploaded_file:
                 h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
 
                 cell_style = get_cell_style(c_type)
-                # Жёсткое правило для Main: если пауза больше 24 часов и нет другого специфического цвета (например, зеленого/красного), делаем синей
-                if not cell_style and pd.notna(h_val) and h_val > 24.0:
+                if not cell_style and pd.notna(h_val) and h_val >= 45.0:
                     cell_style = get_cell_style("blue")
 
                 if 'Отдых ДО смены (ч)' in df.columns:
@@ -586,7 +586,6 @@ if uploaded_file:
             styler.apply(highlight_borders, axis=None)
             return styler
 
-        # Убираем скрытую колонку с сырыми часами перед отображением
         render_df = display_df.drop(columns=["_raw_hours"])
 
         col_h, col_b = st.columns([4, 1])
@@ -676,7 +675,7 @@ if uploaded_file:
                         h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in calendar_table.index else np.nan
                         
                         bg_style = get_cell_style(c_type)
-                        if not bg_style and pd.notna(h_val) and h_val > 24.0:
+                        if not bg_style and pd.notna(h_val) and h_val >= 45.0:
                             bg_style = get_cell_style("blue")
 
                         if is_weekend:
