@@ -244,10 +244,10 @@ def process_file_fast(file_bytes, file_name):
                 
                 if short_weekday_count_prior >= 3:
                     color_type = "red"
-                    violation_desc = f"Превышен лимит сокращенных суточных пауз в неделю (уже {short_weekday_count_prior + 1}-я)"
+                    violation_desc = "Превышен лимит сокращенных суточных пауз в неделю"
                 else:
                     color_type = "yellow"
-                    violation_desc = f"Сокращенная суточная пауза ({h:.2f} ч)"
+                    violation_desc = "Сокращенная суточная пауза"
 
             elif 11.0 <= h < 24.0:
                 can_compensate_weekday = False
@@ -263,7 +263,7 @@ def process_file_fast(file_bytes, file_name):
                     extra_h = h - 11.0
                     color_type = "green"
                     display_str = f"11+{extra_h:.2f}"
-                    violation_desc = "Компенсация долга за сокращенную паузу"
+                    violation_desc = f"Компенсация долга ({extra_h:.2f} ч)"
                     active_debts.pop(0)
                 else:
                     color_type = ""
@@ -280,10 +280,10 @@ def process_file_fast(file_bytes, file_name):
 
                 if recent_short_count >= 2:
                     color_type = "red"
-                    violation_desc = f"Превышен лимит сокращенных еженедельных пауз за 4 недели (уже {recent_short_count + 1}-я)"
+                    violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели"
                 else:
                     color_type = "orange"
-                    violation_desc = f"Сокращенная еженедельная пауза — возникновение долга ({45.0 - h:.2f} ч)"
+                    violation_desc = "Сокращенная еженедельная пауза"
 
                 debt_val = 45.0 - h
                 expiry_dt = shift_dt + pd.Timedelta(days=21)
@@ -302,7 +302,7 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
-                        violation_desc = "Компенсация еженедельного долга"
+                        violation_desc = f"Компенсация долга ({extra_h:.2f} ч)"
                         active_debts.pop(0)
                     else:
                         color_type = "blue"
@@ -418,7 +418,7 @@ if uploaded_file:
 
     def render_select_filter(label, options, key_prefix):
         sel_key = f"{key_prefix}_select"
-        all_opts = sorted(list(set(options)))
+        all_opts = sorted(list(set([str(x) for x in options if pd.notna(x) and str(x).strip() != ""])))
 
         st.sidebar.markdown(
             f"<div class='filter-card'><div"
@@ -476,6 +476,11 @@ if uploaded_file:
         daily_df["rest_country_before_shift"].unique(),
         "countries",
     )
+    selected_comments = render_select_filter(
+        "Комментарий",
+        daily_df["violation_description"].unique(),
+        "comments",
+    )
 
     def render_range_filter(label, max_val, key_prefix, step=0.5, unit="ч"):
         min_k, max_k = f"{key_prefix}_min", f"{key_prefix}_max"
@@ -531,7 +536,7 @@ if uploaded_file:
 
     nav_page = st.radio(
         "Навигация",
-        options=["Main", "Calendar", "Violations"],
+        options=["Main", "Calendar"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -557,6 +562,8 @@ if uploaded_file:
         mask &= daily_df["driver_name"].isin(selected_drivers)
     if selected_countries:
         mask &= daily_df["rest_country_before_shift"].isin(selected_countries)
+    if selected_comments:
+        mask &= daily_df["violation_description"].isin(selected_comments)
 
     mask &= (
         daily_df["rest_before_shift_hours"].between(rest_min, rest_max)
@@ -580,7 +587,7 @@ if uploaded_file:
                 "rest_country_before_shift": "Страна отдыха ДО смены",
                 "rest_before_shift_hours": "_raw_hours",
                 "display_text": "Отдых ДО смены (ч)",
-                "violation_description": "Описание отклонения / нарушения",
+                "violation_description": "Комментарий",
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
                 "debt_balance": "Компенсация",
@@ -669,16 +676,6 @@ if uploaded_file:
 
     if nav_page == "Main":
         render_data_table(filtered, "Мониторинг смен")
-
-    elif nav_page == "Violations":
-        violations_mask = daily_df["status_color"] == "red"
-        last_rows_indices = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").tail(1).index
-        last_rows_with_debt = daily_df.loc[last_rows_indices][daily_df.loc[last_rows_indices, "debt_balance"] > 0].index
-        
-        combined_violation_indices = daily_df[violations_mask].index.union(last_rows_with_debt)
-        violations_filtered = daily_df.loc[daily_df.index.isin(combined_violation_indices)].drop(columns=["dt_date"]).reset_index(drop=True)
-        
-        render_data_table(violations_filtered, "Журнал нарушений и активных долгов")
 
     elif nav_page == "Calendar":
         st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
