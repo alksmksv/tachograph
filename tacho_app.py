@@ -425,6 +425,13 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
+    # Вычисление диапазона по умолчанию: последний день выгрузки + 4 полных недели до текущей недели
+    max_dt_pd = pd.to_datetime(max_date)
+    max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
+    default_start_dt = max_week_start - pd.Timedelta(weeks=4)
+    default_start_date = max(min_date, default_start_dt.date())
+    default_end_date = max_date
+
     latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
     vehicles_with_violations = daily_df[daily_df["status_color"] == "red"]["vehicle_name"].unique().tolist()
@@ -436,7 +443,7 @@ if uploaded_file:
     )
     date_range = st.sidebar.date_input(
         "Период",
-        value=(min_date, max_date),
+        value=(default_start_date, default_end_date),
         min_value=min_date,
         max_value=max_date,
         key="date_range",
@@ -774,6 +781,10 @@ if uploaded_file:
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
+            # Переносим столбец "Компенсация" в самый конец (правая часть), чтобы он был справа при скролле
+            cols_order = [c for c in display_calendar.columns if c != "Компенсация"] + ["Компенсация"]
+            display_calendar = display_calendar[cols_order]
+
             new_column_names = {}
             for col in display_calendar.columns:
                 if col in ["Группа", "Компенсация"]:
@@ -824,14 +835,13 @@ if uploaded_file:
 
             styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
             
-            # Закрепляем столбцы Группа и Компенсация, чтобы они не уезжали при скролле
+            # Закрепляем столбец Группа слева
             st.dataframe(
                 styled_calendar,
                 use_container_width=True,
                 height=750,
                 column_config={
                     "Группа": st.column_config.TextColumn("Группа", pinned=True),
-                    "Компенсация": st.column_config.NumberColumn("Компенсация", format="%.2f", pinned=True)
                 }
             )
         else:
@@ -842,7 +852,6 @@ if uploaded_file:
 
         latest_df = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name", as_index=False).last()
         
-        # Применяем сайдбар фильтры также для вкладки компенсаций
         comp_mask = pd.Series(True, index=latest_df.index)
         if only_debt_vehicles:
             comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_debt)
@@ -888,7 +897,7 @@ if uploaded_file:
 
         viol_df = filtered[filtered["status_color"] == "red"].copy()
         
-        # Переименуем колонки под интерфейс главной страницы, но без столбца Компенсация
+        # Переименуем колонки под интерфейс главной страницы, исключив столбец Компенсация
         display_viol = viol_df.drop(columns=["status_color", "debt_balance"]).rename(
             columns={
                 "date": "Дата",
