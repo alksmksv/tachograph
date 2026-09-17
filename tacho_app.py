@@ -228,52 +228,69 @@ def process_file_fast(file_bytes, file_name):
                 continue
 
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6]
+            is_weekend_end = end_weekday in [0, 6]  # ПН или ВС
 
+            # ==================================================================
+            # 1. ДИАПАЗОН 9 <= h < 11
+            # ==================================================================
             if 9.0 <= h < 11.0:
-                w_start = row["week_start"]
-                week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
-                short_weekday_count_prior = 0
-                for _, p_row in v_group[week_shifts_mask].iterrows():
-                    ph = p_row["rest_before_shift_hours"]
-                    pe = p_row["pause_end"]
-                    pe_wd = pe.dayofweek if pd.notna(pe) else 0
-                    if pd.notna(ph) and 9.0 <= ph < 11.0 and pe_wd not in [0, 6]:
-                        short_weekday_count_prior += 1
-                
-                if short_weekday_count_prior >= 3:
+                if is_weekend_end:
                     color_type = "red"
-                    violation_desc = "Превышен лимит сокращенных суточных пауз в неделю"
+                    violation_desc = "Сокращенная суточная пауза в воскресенье/понедельник"
                 else:
-                    color_type = "yellow"
-                    violation_desc = "Сокращенная суточная пауза"
+                    w_start = row["week_start"]
+                    week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
+                    short_weekday_count_prior = 0
+                    for _, p_row in v_group[week_shifts_mask].iterrows():
+                        ph = p_row["rest_before_shift_hours"]
+                        pe = p_row["pause_end"]
+                        pe_wd = pe.dayofweek if pd.notna(pe) else 0
+                        if pd.notna(ph) and 9.0 <= ph < 11.0 and pe_wd not in [0, 6]:
+                            short_weekday_count_prior += 1
+                    
+                    if short_weekday_count_prior >= 3:
+                        color_type = "red"
+                        violation_desc = "Превышен лимит сокращенных суточных пауз в неделю (4-я или более)"
+                    else:
+                        color_type = "yellow"
+                        violation_desc = "Сокращенная суточная пауза"
 
+            # ==================================================================
+            # 2. ДИАПАЗОН 11 <= h < 24
+            # ==================================================================
             elif 11.0 <= h < 24.0:
-                can_compensate_weekday = False
-                if active_debts:
-                    oldest_debt = active_debts[0]
-                    prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
-                    if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
-                        can_compensate_weekday = True
-
-                req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate_weekday) else 0)
-                
-                if active_debts and can_compensate_weekday and h >= req_h:
-                    extra_h = h - 11.0
-                    color_type = "green"
-                    display_str = f"11+{extra_h:.2f}"
-                    violation_desc = "Компенсация долга"
-                    active_debts.pop(0)  
+                if is_weekend_end:
+                    color_type = "red"
+                    violation_desc = "Пауза < 24 часов в воскресенье/понедельник"
                 else:
-                    color_type = ""
-                    violation_desc = ""
+                    # Проверяем компенсацию долга (режим 11+h)
+                    can_compensate_weekday = False
+                    if active_debts:
+                        oldest_debt = active_debts[0]
+                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
+                        if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
+                            can_compensate_weekday = True
 
+                    req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate_weekday) else 0)
+                    
+                    if active_debts and can_compensate_weekday and h >= req_h:
+                        extra_h = h - 11.0
+                        color_type = "green"
+                        display_str = f"11+{extra_h:.2f}"
+                        violation_desc = "Компенсация долга"
+                        active_debts.pop(0)  
+                    else:
+                        color_type = ""
+                        violation_desc = ""
+
+            # ==================================================================
+            # 3. ДИАПАЗОН 24 <= h < 45
+            # ==================================================================
             elif 24.0 <= h < 45.0:
-                # Проверяем день окончания: если это Вт, Ср, Чт, Пт, Сб (индексы 1, 2, 3, 4, 5)
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
+                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]  # ВТ, СР, ЧТ, ПТ, СБ
 
                 if is_midweek_end:
-                    # По правилу: пауза в середине недели не считается еженедельной -> не добавляет долг, но может компенсировать прежний как 11+h
+                    # Посреди недели не считается еженедельной -> долг не добавляет, но может компенсировать прежний как 11+h
                     can_compensate = False
                     if active_debts:
                         oldest_debt = active_debts[0]
@@ -287,24 +304,26 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_desc = "Компенсация долга (среденедельная пауза)"
+                        violation_desc = "Компенсация долга (пауза 24+ посреди недели)"
                         active_debts.pop(0)
                     else:
-                        color_type = "orange"
-                        violation_desc = "Сокращенная еженедельная пауза (середина недели, без долга)"
+                        color_type = ""  # Бесцветный
+                        violation_desc = "Пауза 24+ посреди недели (без долга)"
                 else:
-                    # Стандартная сокращенная еженедельная пауза (заканчивается в Пн или Вс)
+                    # Заканчивается в ВС или ПН -> полноценная сокращенная еженедельная пауза
                     four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                     recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
                     recent_short_count = 0
                     for _, p_row in v_group[recent_mask].iterrows():
                         ph = p_row["rest_before_shift_hours"]
-                        if pd.notna(ph) and 24.0 <= ph < 45.0:
+                        pe = p_row["pause_end"]
+                        pe_wd = pe.dayofweek if pd.notna(pe) else 0
+                        if pd.notna(ph) and 24.0 <= ph < 45.0 and pe_wd in [0, 6]:
                             recent_short_count += 1
 
                     if recent_short_count >= 2:
                         color_type = "red"
-                        violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели"
+                        violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели (3-я или более)"
                     else:
                         color_type = "orange"
                         violation_desc = "Сокращенная еженедельная пауза"
@@ -319,6 +338,9 @@ def process_file_fast(file_bytes, file_name):
                         "source_weekend_end": weekend_end_ref
                     })
 
+            # ==================================================================
+            # 4. ДИАПАЗОН h >= 45
+            # ==================================================================
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
