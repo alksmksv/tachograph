@@ -259,7 +259,7 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45 (Сокращенный еженедельный отдых -> Синий, так как > 24ч)
+            # 3. Диапазон 24 <= h < 45 (Сокращенный еженедельный отдых -> Синий)
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -528,7 +528,7 @@ if uploaded_file:
     if nav_page == "Main":
         filtered_display = filtered.copy()
 
-        display_df = filtered_display.drop(columns=["rest_before_shift_hours", "status_color"]).rename(
+        display_df = filtered_display.drop(columns=["status_color"]).rename(
             columns={
                 "date": "Дата",
                 "weekday": "День недели",
@@ -537,6 +537,7 @@ if uploaded_file:
                 "vehicle_name": "Машина",
                 "driver_name": "Водитель",
                 "rest_country_before_shift": "Страна отдыха ДО смены",
+                "rest_before_shift_hours": "_raw_hours",
                 "display_text": "Отдых ДО смены (ч)",
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
@@ -559,7 +560,12 @@ if uploaded_file:
                 idx = row.name
                 
                 c_type = raw_df.loc[idx, "status_color"] if idx in raw_df.index else ""
+                h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
+
                 cell_style = get_cell_style(c_type)
+                # Жёсткое правило для Main: если пауза больше 24 часов и нет другого специфического цвета (например, зеленого/красного), делаем синей
+                if not cell_style and pd.notna(h_val) and h_val > 24.0:
+                    cell_style = get_cell_style("blue")
 
                 if 'Отдых ДО смены (ч)' in df.columns:
                     col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
@@ -580,16 +586,19 @@ if uploaded_file:
             styler.apply(highlight_borders, axis=None)
             return styler
 
+        # Убираем скрытую колонку с сырыми часами перед отображением
+        render_df = display_df.drop(columns=["_raw_hours"])
+
         col_h, col_b = st.columns([4, 1])
         with col_h:
             st.markdown(
                 "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
-                f" {len(display_df)})</div>",
+                f" {len(render_df)})</div>",
                 unsafe_allow_html=True,
             )
         with col_b:
-            if not display_df.empty:
-                excel_file = convert_df_to_excel(display_df)
+            if not render_df.empty:
+                excel_file = convert_df_to_excel(render_df)
                 st.download_button(
                     label="📥 Скачать Excel",
                     data=excel_file,
@@ -598,15 +607,15 @@ if uploaded_file:
                     use_container_width=True,
                 )
 
-        if not display_df.empty:
-            styled_display = apply_table_styling(display_df.head(500), filtered)
+        if not render_df.empty:
+            styled_display = apply_table_styling(render_df.head(500), filtered)
             st.dataframe(
                 styled_display,
                 use_container_width=True,
                 hide_index=True,
                 height=750,
             )
-            if len(display_df) > 500:
+            if len(render_df) > 500:
                 st.caption(" Отображены первые 500 строк. Скачайте Excel для получения полного файла.")
         else:
             st.info("Данные не найдены.")
@@ -664,7 +673,6 @@ if uploaded_file:
 
                     for idx in calendar_table.index:
                         c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in calendar_table.index else ""
-                        
                         h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in calendar_table.index else np.nan
                         
                         bg_style = get_cell_style(c_type)
