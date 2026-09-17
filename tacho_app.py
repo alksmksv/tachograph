@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(layout="wide", page_title="Мониторинг смен")
+st.set_page_config(layout="wide", page_title="Мониторинг смен РТО")
 
 # ==============================================================================
-# CSS-СТИЛИ: СИНИЕ ТЕГИ, КОМПАКТНЫЙ СУПЕР-UI И ВЫДЕЛЕНИЕ ПАУЗ
+# CSS-СТИЛИ
 # ==============================================================================
 st.markdown(
     """
@@ -92,33 +92,24 @@ st.markdown(
 
 
 # ==============================================================================
-# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА ЧАСОВ ОТДЫХА
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА
 # ==============================================================================
-def get_rest_color(hours, is_fourth_restricted=False, is_second_short_weekend=False):
-  if pd.isna(hours):
-    return ""
-  try:
-    h = float(hours)
-  except:
-    return ""
-
-  if 9.0 <= h < 11.0:
-    if is_fourth_restricted:
-      return "background-color: #FEE2E2;"  # Светло-красный (4-я и более подряд)
-    return "background-color: #FEF9C3;"  # Светло-желтый
-  elif 24.0 <= h < 45.0:  # Короткий выходной
-    if is_second_short_weekend:
-      return "background-color: #FEE2E2;"  # Светло-красный (2-й и более подряд после >=45)
-    return "background-color: #FEF9C3;"  # Светло-желтый
-  elif h >= 45.0:
-    return "background-color: #DCFCE7;"  # Светло-зеленый
+def get_cell_style(color_type):
+  if color_type == "blue":
+    return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"  # Синий (Норма)
+  elif color_type == "yellow":
+    return "background-color: #FEF9C3; color: #713F12;"  # Желтый (Сокращение / Предупреждение)
+  elif color_type == "green":
+    return "background-color: #DCFCE7; font-weight: bold; color: #166534;"  # Зеленый (Успешная компенсация)
+  elif color_type == "red":
+    return "background-color: #FEE2E2; font-weight: bold; color: #991B1B;"  # Красный (Нарушение)
   return ""
 
 
 # ==============================================================================
-# БЫСТРАЯ ВЕКТОРНАЯ ОБРАБОТКА ДАННЫХ
+# ОБРАБОТКА ДАННЫХ И РТО-ЛОГИКА
 # ==============================================================================
-@st.cache_data(show_spinner="Обработка файла...")
+@st.cache_data(show_spinner="Обработка файла и проверка РТО...")
 def process_file_fast(file_bytes, file_name):
   if file_name.endswith(".csv"):
     df = pd.read_csv(io.BytesIO(file_bytes))
@@ -199,57 +190,146 @@ def process_file_fast(file_bytes, file_name):
   agg_df["pause_start"] = agg_df["shift_id"].map(pause_start_before)
   agg_df["pause_end"] = agg_df["shift_id"].map(pause_end_before)
 
-  agg_df["pause_start"] = pd.to_datetime(agg_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
-  agg_df["pause_end"] = pd.to_datetime(agg_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
+  # Календарная неделя (Пн-Вс) для каждого старта смены
+  agg_df["week_start"] = agg_df["shift_start"].apply(
+      lambda x: (x - pd.Timedelta(days=x.dayofweek)).normalize()
+  )
 
-  is_fourth_flags = []
-  is_second_short_weekend_flags = []
-
-  for _, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
-    consecutive_9_11_count = 0
-    short_weekend_streak = 0
-
+  # Применяем детальный симуляционный расчет РТО по машинам
+  processed_rows = []
+  
+  for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
+    v_group = v_group.reset_index(drop=True)
+    
+    # Для отслеживания долгов и лимитов
+    active_debts = []  # Список словарей: { 'debt_hours': float, 'expiry_date': timestamp }
+    
     for idx, row in v_group.iterrows():
       h = row["rest_before_shift_hours"]
-      if pd.isna(h):
-        is_fourth_flags.append((idx, False))
-        is_second_short_weekend_flags.append((idx, False))
-        continue
+      p_start = row["pause_start"]
+      p_end = row["pause_end"]
+      shift_dt = row["shift_start"]
       
-      # Логика для 9-11 часов (короткие смены)
-      if h >= 11.0:
-        consecutive_9_11_count = 0
-        is_fourth_flags.append((idx, False))
-      elif 9.0 <= h < 11.0:
-        if consecutive_9_11_count >= 3: # 4-я и более
-          is_fourth_flags.append((idx, True))
-        else:
-          is_fourth_flags.append((idx, False))
-        consecutive_9_11_count += 1
-      else:
-        consecutive_9_11_count = 0
-        is_fourth_flags.append((idx, False))
+      # Определяем, является ли пауза выходным днем (пересекает Сб или Вс)
+      is_weekend_rest = False
+      if pd.notna(p_start) and pd.notna(p_end):
+        # Проверяем, есть ли суббота или воскресенье в интервале [p_start, p_end]
+        curr_d = p_start.normalize()
+        while curr_d <= p_end.normalize():
+          if curr_d.dayofweek in [5, 6]: # 5=Сб, 6=Вс
+            is_weekend_rest = True
+            break
+          curr_d += pd.Timedelta(days=1)
 
-      # Логика для 24-45 часов (длинные смены/выходные)
-      if h >= 45.0:
-        short_weekend_streak = 0
-        is_second_short_weekend_flags.append((idx, False))
-      elif 24.0 <= h < 45.0:
-        short_weekend_streak += 1
-        if short_weekend_streak >= 2: # 2-й и более подряд после >=45
-          is_second_short_weekend_flags.append((idx, True))
-        else:
-          is_second_short_weekend_flags.append((idx, False))
-      else:
+      color_type = "blue"
+      display_str = f"{h:.2f}" if pd.notna(h) else "N/A"
+      
+      if pd.isna(h):
+        row["status_color"] = "blue"
+        row["display_text"] = "N/A"
+        processed_rows.append(row)
+        continue
+
+      # Проверка на будни vs выходные
+      if not is_weekend_rest:
+        # БУДНИ
         if h < 9.0:
-          short_weekend_streak = 0
-        is_second_short_weekend_flags.append((idx, False))
+          color_type = "red" # Нарушение (<9 часов)
+        elif 9.0 <= h < 11.0:
+          # Проверяем количество коротких пауз на этой календарной неделе
+          w_start = row["week_start"]
+          week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
+          short_weekday_count_prior = 0
+          for p_idx, p_row in v_group[week_shifts_mask].iterrows():
+            ph = p_row["rest_before_shift_hours"]
+            ps = p_row["pause_start"]
+            pe = p_row["pause_end"]
+            # Убедимся, что это будничная короткая
+            if pd.notna(ph) and 9.0 <= ph < 11.0:
+              is_wkend = False
+              if pd.notna(ps) and pd.notna(pe):
+                cd = ps.normalize()
+                while cd <= pe.normalize():
+                  if cd.dayofweek in [5, 6]:
+                    is_wkend = True
+                    break
+                  cd += pd.Timedelta(days=1)
+              if not is_wkend:
+                short_weekday_count_prior += 1
+          
+          if short_weekday_count_prior >= 3:
+            color_type = "red" # 4-я короткая на неделе -> нарушение
+          else:
+            color_type = "yellow" # 1-3 короткая -> предупреждение
+            
+        else:
+          # >= 11 часов на буднях. Проверяем, является ли это успешной компенсацией долга
+          if active_debts:
+            # Проверяем, покрывает ли пауза 11 + долг (берем самый старый долг)
+            oldest_debt = active_debts[0]
+            required_hours = 11.0 + oldest_debt["debt_hours"]
+            if h >= required_hours:
+              H = h - 11.0
+              color_type = "green"
+              display_str = f"11+{H:.2f}"
+              active_debts.pop(0) # Погасили долг
+            else:
+              color_type = "blue"
+          else:
+            color_type = "blue"
+      
+      else:
+        # ВЫХОДНЫЕ / ДЛИННЫЕ ПАУЗЫ
+        if h < 24.0:
+          color_type = "red" # Пауза выходного дня короче 24 часов -> нарушение
+        elif 24.0 <= h < 45.0:
+          # Сокращенный выходной
+          # Проверяем лимит: не более 2 раз за скользящие 4 недели (28 дней)
+          window_start = shift_dt - pd.Timedelta(days=28)
+          window_mask = (v_group["shift_start"] >= window_start) & (v_group["shift_start"] < shift_dt) & (v_group.index < idx)
+          short_wkend_count = 0
+          for p_idx, p_row in v_group[window_mask].iterrows():
+            ph = p_row["rest_before_shift_hours"]
+            if pd.notna(ph) and 24.0 <= ph < 45.0:
+              short_wkend_count += 1
+          
+          if short_wkend_count >= 2:
+            color_type = "red" # 3-я сокращенная за 4 недели -> нарушение лимита
+          else:
+            color_type = "yellow" # 1-2 сокращенная -> норма с долгом
+            # Создаем долг
+            debt_val = 45.0 - h
+            expiry_dt = shift_dt + pd.Timedelta(days=28) # 3 следующие недели (всего 4 недели окно)
+            active_debts.append({"debt_hours": debt_val, "expiry_date": expiry_dt})
+        
+        else:
+          # >= 45 часов
+          # Проверяем, закрывает ли этот выходной старые долги (поверх 45)
+          if active_debts:
+            oldest_debt = active_debts[0]
+            required_hours = 45.0 + oldest_debt["debt_hours"]
+            if h >= required_hours:
+              H = h - 45.0
+              color_type = "green"
+              display_str = f"45+{H:.2f}"
+              active_debts.pop(0)
+            else:
+              color_type = "blue" # Часы сверх 45 не покрыли долг -> долг не закрыт, сама 45 синяя
+          else:
+            color_type = "blue"
 
-  fourth_dict = dict(is_fourth_flags)
-  agg_df["is_fourth_9_11"] = agg_df.index.map(fourth_dict).fillna(False)
+      # Очищаем просроченные долги
+      active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
 
-  second_short_dict = dict(is_second_short_weekend_flags)
-  agg_df["is_second_short_weekend"] = agg_df.index.map(second_short_dict).fillna(False)
+      row["status_color"] = color_type
+      row["display_text"] = display_str
+      processed_rows.append(row)
+
+  res_df = pd.DataFrame(processed_rows)
+  
+  # Форматируем даты для вывода
+  res_df["pause_start"] = pd.to_datetime(res_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
+  res_df["pause_end"] = pd.to_datetime(res_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
 
   cols = [
       "dt_date",
@@ -261,12 +341,12 @@ def process_file_fast(file_bytes, file_name):
       "driver_name",
       "rest_country_before_shift",
       "rest_before_shift_hours",
+      "display_text",
+      "status_color",
       "pause_start",
       "pause_end",
-      "is_fourth_9_11",
-      "is_second_short_weekend",
   ]
-  return agg_df[cols]
+  return res_df[cols]
 
 
 @st.cache_data
@@ -449,7 +529,7 @@ if uploaded_file:
   )
 
   # ==============================================================================
-  # ВЕКТОРНАЯ ФИЛЬТРАЦИЯ
+  # ФИЛЬТРАЦИЯ
   # ==============================================================================
   mask = pd.Series(True, index=daily_df.index)
 
@@ -479,11 +559,8 @@ if uploaded_file:
   # ==============================================================================
   if nav_page == "Main":
     filtered_display = filtered.copy()
-    filtered_display["rest_before_shift_hours_str"] = filtered_display["rest_before_shift_hours"].apply(
-        lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
-    )
 
-    display_df = filtered_display.drop(columns=["rest_before_shift_hours", "is_fourth_9_11", "is_second_short_weekend"]).rename(
+    display_df = filtered_display.drop(columns=["rest_before_shift_hours", "status_color"]).rename(
         columns={
             "date": "Дата",
             "weekday": "День недели",
@@ -492,7 +569,7 @@ if uploaded_file:
             "vehicle_name": "Машина",
             "driver_name": "Водитель",
             "rest_country_before_shift": "Страна отдыха ДО смены",
-            "rest_before_shift_hours_str": "Отдых ДО смены (ч)",
+            "display_text": "Отдых ДО смены (ч)",
             "pause_start": "Начало паузы",
             "pause_end": "Конец паузы",
         }
@@ -513,25 +590,12 @@ if uploaded_file:
         styles = ['' for _ in row]
         idx = row.name
         
-        # Безопасно извлекаем исходные данные по индексу текущей строки отфильтрованного DataFrame
-        raw_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
-        is_fourth = raw_df.loc[idx, "is_fourth_9_11"] if idx in raw_df.index else False
-        is_second_short = raw_df.loc[idx, "is_second_short_weekend"] if idx in raw_df.index else False
-
-        is_rest_ge_24 = pd.notna(raw_val) and raw_val >= 24.0
-        if is_rest_ge_24:
-          styles = ['background-color: #E0F2FE; font-weight: bold; color: #1E3A8A;' for _ in row]
+        c_type = raw_df.loc[idx, "status_color"] if idx in raw_df.index else "blue"
+        cell_style = get_cell_style(c_type)
 
         if 'Отдых ДО смены (ч)' in df.columns:
           col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
-          color_style = get_rest_color(raw_val, is_fourth_restricted=is_fourth, is_second_short_weekend=is_second_short)
-          if color_style:
-            if is_rest_ge_24:
-              styles[col_idx] = color_style + " font-weight: bold; color: #1E3A8A;"
-            else:
-              styles[col_idx] = color_style
-          elif not is_rest_ge_24:
-            styles[col_idx] = ''
+          styles[col_idx] = cell_style
 
         return styles
 
@@ -580,30 +644,25 @@ if uploaded_file:
       st.info("Данные не найдены.")
 
   # ==============================================================================
-  # СТРАНИЦА: CALENDAR (Матрица машин по датам с выделением больших пауз >= 24ч)
+  # СТРАНИЦА: CALENDAR
   # ==============================================================================
   elif nav_page == "Calendar":
     st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
 
     if not filtered.empty:
       pivot_df = filtered.copy()
-      pivot_df["formatted_hours"] = pivot_df["rest_before_shift_hours"].apply(
-          lambda x: f"{x:.2f}" if pd.notna(x) else ""
-      )
 
       grouped_matrix = (
           pivot_df.groupby(["vehicle_name", "date"])
           .agg({
-              "formatted_hours": lambda x: " / ".join([str(v) for v in x if v != ""]),
-              "is_fourth_9_11": "any",
-              "is_second_short_weekend": "any",
-              "rest_before_shift_hours": "max"
+              "display_text": lambda x: " / ".join([str(v) for v in x if v != ""]),
+              "status_color": "last"
           })
           .reset_index()
       )
 
       calendar_table = grouped_matrix.pivot(
-          index="vehicle_name", columns="date", values="formatted_hours"
+          index="vehicle_name", columns="date", values="display_text"
       ).fillna("")
 
       new_column_names = {}
@@ -620,17 +679,9 @@ if uploaded_file:
           pass
       calendar_table = calendar_table.rename(columns=new_column_names)
 
-      fourth_matrix = grouped_matrix.pivot(
-          index="vehicle_name", columns="date", values="is_fourth_9_11"
-      ).fillna(False)
-
-      second_short_matrix = grouped_matrix.pivot(
-          index="vehicle_name", columns="date", values="is_second_short_weekend"
-      ).fillna(False)
-
-      hours_matrix = grouped_matrix.pivot(
-          index="vehicle_name", columns="date", values="rest_before_shift_hours"
-      )
+      color_matrix = grouped_matrix.pivot(
+          index="vehicle_name", columns="date", values="status_color"
+      ).fillna("blue")
 
       def style_calendar_cell(data):
         df_styles = pd.DataFrame('', index=calendar_table.index, columns=calendar_table.columns)
@@ -642,21 +693,8 @@ if uploaded_file:
             is_weekend = False
 
           for idx in calendar_table.index:
-            val = calendar_table.loc[idx, new_col]
-            is_fourth = fourth_matrix.loc[idx, orig_col] if orig_col in fourth_matrix.columns and idx in fourth_matrix.index else False
-            is_sec_short = second_short_matrix.loc[idx, orig_col] if orig_col in second_short_matrix.columns and idx in second_short_matrix.index else False
-            h_max = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in hours_matrix.index else np.nan
-
-            bg_style = ""
-            if val and not pd.isna(val):
-              bg_style = get_rest_color(h_max, is_fourth_restricted=is_fourth, is_second_short_weekend=is_sec_short)
-            
-            # Для больших пауз (от 24 часов): жирный шрифт, увеличенный кегль (13px) и темно-синий цвет (#1E3A8A)
-            if not pd.isna(h_max) and h_max >= 24.0:
-              if bg_style:
-                bg_style += " font-weight: bold; font-size: 13px; color: #1E3A8A;"
-              else:
-                bg_style = "font-weight: bold; font-size: 13px; color: #1E3A8A;"
+            c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in color_matrix.index else "blue"
+            bg_style = get_cell_style(c_type)
 
             if is_weekend:
               if not bg_style:
