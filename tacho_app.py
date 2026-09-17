@@ -212,7 +212,6 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Убираем просроченные долги
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
             
             color_type = ""
@@ -228,11 +227,8 @@ def process_file_fast(file_bytes, file_name):
                 continue
 
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6]  # ПН или ВС
+            is_weekend_end = end_weekday in [0, 6]
 
-            # ==================================================================
-            # 1. ДИАПАЗОН 9 <= h < 11
-            # ==================================================================
             if 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -255,15 +251,11 @@ def process_file_fast(file_bytes, file_name):
                         color_type = "yellow"
                         violation_desc = "Сокращенная суточная пауза"
 
-            # ==================================================================
-            # 2. ДИАПАЗОН 11 <= h < 24
-            # ==================================================================
             elif 11.0 <= h < 24.0:
                 if is_weekend_end:
                     color_type = "red"
                     violation_desc = "Пауза < 24 часов в воскресенье/понедельник"
                 else:
-                    # Проверяем компенсацию долга (режим 11+h)
                     can_compensate_weekday = False
                     if active_debts:
                         oldest_debt = active_debts[0]
@@ -283,11 +275,8 @@ def process_file_fast(file_bytes, file_name):
                         color_type = ""
                         violation_desc = ""
 
-            # ==================================================================
-            # 3. ДИАПАЗОН 24 <= h < 45
-            # ==================================================================
             elif 24.0 <= h < 45.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]  # ВТ, СР, ЧТ, ПТ, СБ
+                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
 
                 if is_midweek_end:
                     can_compensate = False
@@ -336,9 +325,6 @@ def process_file_fast(file_bytes, file_name):
                         "source_weekend_end": weekend_end_ref
                     })
 
-            # ==================================================================
-            # 4. ДИАПАЗОН h >= 45
-            # ==================================================================
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
@@ -785,7 +771,6 @@ if uploaded_file:
             latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
             display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
 
-            # Добавляем колонку Группа слева от имени машины
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
@@ -838,7 +823,17 @@ if uploaded_file:
                 return df_styles
 
             styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
-            st.dataframe(styled_calendar, use_container_width=True, height=750)
+            
+            # Закрепляем столбцы Группа и Компенсация, чтобы они не уезжали при скролле
+            st.dataframe(
+                styled_calendar,
+                use_container_width=True,
+                height=750,
+                column_config={
+                    "Группа": st.column_config.TextColumn("Группа", pinned=True),
+                    "Компенсация": st.column_config.NumberColumn("Компенсация", format="%.2f", pinned=True)
+                }
+            )
         else:
             st.info("Нет данных для отображения матрицы.")
 
@@ -846,7 +841,21 @@ if uploaded_file:
         st.markdown("<div class='main-header' style='margin-top: 15px;'>Компенсация машин</div>", unsafe_allow_html=True)
 
         latest_df = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name", as_index=False).last()
-        comp_df = latest_df[["group", "vehicle_name", "debt_balance"]].copy()
+        
+        # Применяем сайдбар фильтры также для вкладки компенсаций
+        comp_mask = pd.Series(True, index=latest_df.index)
+        if only_debt_vehicles:
+            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_debt)
+        if only_violations:
+            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_violations)
+        if selected_groups:
+            comp_mask &= latest_df["group"].isin(selected_groups)
+        if selected_vehicles:
+            comp_mask &= latest_df["vehicle_name"].isin(selected_vehicles)
+            
+        filtered_latest = latest_df[comp_mask]
+
+        comp_df = filtered_latest[["group", "vehicle_name", "debt_balance"]].copy()
         comp_df.columns = ["Группа", "Машина", "Время компенсации"]
         comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
 
@@ -879,7 +888,7 @@ if uploaded_file:
 
         viol_df = filtered[filtered["status_color"] == "red"].copy()
         
-        # Переименуем колонки под пользовательский интерфейс и исключим компенсацию (debt_balance)
+        # Переименуем колонки под интерфейс главной страницы, но без столбца Компенсация
         display_viol = viol_df.drop(columns=["status_color", "debt_balance"]).rename(
             columns={
                 "date": "Дата",
@@ -889,20 +898,64 @@ if uploaded_file:
                 "vehicle_name": "Машина",
                 "driver_name": "Водитель",
                 "rest_country_before_shift": "Страна отдыха ДО смены",
-                "rest_before_shift_hours": "Отдых ДО смены (ч)",
-                "display_text": "Отображение отдыха",
+                "rest_before_shift_hours": "_raw_hours",
+                "display_text": "Отдых ДО смены (ч)",
                 "violation_description": "Комментарий",
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
             }
         )
 
+        if not display_viol.empty:
+            sub_dfs = []
+            for vehicle, group_df in display_viol.groupby("Машина", sort=True):
+                sorted_sub = group_df.sort_values(by="Дата", ascending=True)
+                sub_dfs.append(sorted_sub)
+            display_viol = pd.concat(sub_dfs, ignore_index=True)
+
+        def apply_viol_styling(df, raw_df):
+            if df.empty:
+                return df.style
+
+            def style_row(row):
+                styles = ['' for _ in row]
+                idx = row.name
+                c_type = "red"
+                h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
+
+                cell_style = get_cell_style(c_type)
+                if 'Отдых ДО смены (ч)' in df.columns:
+                    col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
+                    styles[col_idx] = cell_style
+
+                row_blue_style = "background-color: #DBEAFE; color: #1E3A8A;" if (pd.notna(h_val) and h_val >= 24.0) else ""
+                if row_blue_style:
+                    for i, col_name in enumerate(df.columns):
+                        if col_name != 'Отдых ДО смены (ч)':
+                            styles[i] = row_blue_style
+                return styles
+
+            styler = df.style.apply(style_row, axis=1)
+            
+            def highlight_borders(df_sub):
+                css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
+                cars = df_sub['Машина'].values
+                for i in range(1, len(cars)):
+                    if cars[i] != cars[i-1]:
+                        css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
+                return css_styles
+
+            styler.apply(highlight_borders, axis=None)
+            return styler
+
+        render_viol_df = display_viol.drop(columns=["_raw_hours"])
+
         col_h, col_b = st.columns([4, 1])
         with col_h:
-            st.markdown(f"<div style='font-size: 14px; font-weight: 600; margin-top: 10px;'>Найдено нарушений: {len(display_viol)}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size: 14px; font-weight: 600; margin-top: 10px;'>Найдено нарушений: {len(render_viol_df)}</div>", unsafe_allow_html=True)
         with col_b:
-            if not display_viol.empty:
-                excel_file = convert_df_to_excel(display_viol)
+            if not render_viol_df.empty:
+                excel_file = convert_df_to_excel(render_viol_df)
                 st.download_button(
                     label="📥 Скачать Excel",
                     data=excel_file,
@@ -911,9 +964,10 @@ if uploaded_file:
                     use_container_width=True,
                 )
 
-        if not display_viol.empty:
+        if not render_viol_df.empty:
+            styled_viol = apply_viol_styling(render_viol_df, viol_df.reset_index(drop=True))
             st.dataframe(
-                display_viol.style.apply(lambda r: [get_cell_style("red") if col == "Отдых ДО смены (ч)" else "" for col in display_viol.columns], axis=1),
+                styled_viol,
                 use_container_width=True,
                 hide_index=True,
                 height=750,
