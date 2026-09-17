@@ -215,9 +215,9 @@ def process_file_fast(file_bytes, file_name):
             # Очищаем просроченные долги (срок действия 21 день)
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
             
-            # Текущий долг на момент начала смены, отформатированный до 2 знаков
+            # Сохраняем долг как число (float) для корректной сортировки
             current_debt_val = round(sum(d["debt_hours"] for d in active_debts), 2)
-            row["debt_balance"] = f"{current_debt_val:.2f}"
+            row["debt_balance"] = float(current_debt_val)
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
@@ -391,7 +391,6 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Извлекаем числовое значение долга для фильтрации машин с долгом
     latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
 
@@ -410,7 +409,6 @@ if uploaded_file:
     )
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
-    # Чекбокс фильтра машин с долгом
     st.sidebar.markdown("<div class='filter-card'>", unsafe_allow_html=True)
     only_debt_vehicles = st.sidebar.checkbox("⚠️ Только машины с долгом", value=False, key="only_debt_checkbox")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
@@ -610,7 +608,8 @@ if uploaded_file:
 
                 return styles
 
-            styler = df.style.apply(style_specific_row_and_cell, axis=1)
+            # Форматируем числовой столбец «Компенсация» до двух знаков без превращения в строку
+            styler = df.style.apply(style_specific_row_and_cell, axis=1).format({"Компенсация": "{:.2f}"})
             
             def highlight_borders(df_sub):
                 css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
@@ -662,7 +661,6 @@ if uploaded_file:
         if not filtered.empty:
             pivot_df = filtered.copy()
 
-            # Безопасная агрегация для предотвращения ошибок с пустыми значениями (NaN)
             def safe_max_hours(x):
                 valid = x.dropna()
                 return valid.max() if not valid.empty else np.nan
@@ -693,9 +691,9 @@ if uploaded_file:
                 index="vehicle_name", columns="date", values="display_text"
             ).fillna("")
 
-            # Добавляем столбец «Компенсация» с актуальным долгом на последнюю дату (формат с 2 знаками)
-            latest_debts_formatted = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"]
-            calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_formatted).fillna("0.00")
+            # Добавляем столбец «Компенсация» как число (float) для правильной сортировки
+            latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
+            calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_float).fillna(0.0)
 
             new_column_names = {}
             for col in calendar_table.columns:
@@ -729,7 +727,7 @@ if uploaded_file:
                     if orig_col == "Компенсация":
                         for idx in calendar_table.index:
                             try:
-                                val = float(latest_debts_formatted.get(idx, 0.0))
+                                val = float(latest_debts_float.get(idx, 0.0))
                             except:
                                 val = 0.0
                             if val > 0:
@@ -760,7 +758,8 @@ if uploaded_file:
 
                 return df_styles
 
-            styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None)
+            # Применяем форматирование числа с двумя знаками для колонки «Компенсация» через .format()
+            styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
             st.dataframe(styled_calendar, use_container_width=True, height=750)
         else:
             st.info("Нет данных для отображения матрицы.")
