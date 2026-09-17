@@ -152,12 +152,18 @@ def process_file_fast(file_bytes, file_name):
     df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
     df["pause_end_dt"] = np.where(is_rest, df["end_datetime"], pd.NaT)
 
-    rest_before_hours = df[is_rest].groupby("shift_id")["rest_hours"].first()
-    rest_before_country = df[is_rest].groupby("shift_id")["rest_country"].first()
-    
-    rest_filtered = df[is_rest]
-    pause_start_before = rest_filtered.groupby("shift_id")["pause_start_dt"].first()
-    pause_end_before = rest_filtered.groupby("shift_id")["pause_end_dt"].first()
+    # Если на один shift_id приходится несколько пауз, берем максимальную по длительности
+    rest_subset = df[is_rest].copy()
+    if not rest_subset.empty:
+        idx_max = rest_subset.groupby("shift_id")["rest_hours"].idxmax()
+        rest_filtered = rest_subset.loc[idx_max]
+    else:
+        rest_filtered = rest_subset
+
+    rest_before_hours = rest_filtered.set_index("shift_id")["rest_hours"]
+    rest_before_country = rest_filtered.set_index("shift_id")["rest_country"]
+    pause_start_before = rest_filtered.set_index("shift_id")["pause_start_dt"]
+    pause_end_before = rest_filtered.set_index("shift_id")["pause_end_dt"]
 
     work_df = df[~is_rest].copy()
     if work_df.empty:
@@ -259,7 +265,7 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45 (Желтый для 1-го и 2-го в рамках 4 недель, Красный для 3-го)
+            # 3. Диапазон 24 <= h < 45
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -283,7 +289,7 @@ def process_file_fast(file_bytes, file_name):
                     "source_weekend_end": weekend_end_ref
                 })
 
-            # 4. Диапазон h >= 45 (Синий, либо Зеленый при компенсации 45+h)
+            # 4. Диапазон h >= 45
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
