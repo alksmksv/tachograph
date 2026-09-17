@@ -99,6 +99,8 @@ def get_cell_style(color_type):
         return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"
     elif color_type == "yellow":
         return "background-color: #FEF9C3; color: #713F12;"
+    elif color_type == "orange":
+        return "background-color: #FFEDD5; color: #9A3412; font-weight: bold;"
     elif color_type == "green":
         return "background-color: #DCFCE7; font-weight: bold; color: #166534;"
     elif color_type == "red":
@@ -152,7 +154,7 @@ def process_file_fast(file_bytes, file_name):
     df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
     df["pause_end_dt"] = np.where(is_rest, df["end_datetime"], pd.NaT)
 
-    # Если на один shift_id приходится несколько пауз, берем максимальную по длительности
+    # Если в один день / смену несколько пауз, берем максимальную по длительности
     rest_subset = df[is_rest].copy()
     if not rest_subset.empty:
         idx_max = rest_subset.groupby("shift_id")["rest_hours"].idxmax()
@@ -265,7 +267,7 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45
+            # 3. Диапазон 24 <= h < 45 (Оранжевый для 1-го и 2-го в рамках 4 недель, Красный для 3-го)
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -278,7 +280,7 @@ def process_file_fast(file_bytes, file_name):
                 if recent_short_count >= 2:
                     color_type = "red"
                 else:
-                    color_type = "yellow"
+                    color_type = "orange"
 
                 debt_val = 45.0 - h
                 expiry_dt = shift_dt + pd.Timedelta(days=21)
@@ -289,7 +291,7 @@ def process_file_fast(file_bytes, file_name):
                     "source_weekend_end": weekend_end_ref
                 })
 
-            # 4. Диапазон h >= 45
+            # 4. Диапазон h >= 45 (Синий, либо Зеленый при компенсации 45+h)
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
