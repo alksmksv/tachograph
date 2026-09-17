@@ -215,9 +215,9 @@ def process_file_fast(file_bytes, file_name):
             # Очищаем просроченные долги (срок действия 21 день)
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
             
-            # Текущий долг на момент начала смены
-            current_debt_val = sum(d["debt_hours"] for d in active_debts)
-            row["debt_balance"] = round(current_debt_val, 2)
+            # Текущий долг на момент начала смены, отформатированный до 2 знаков
+            current_debt_val = round(sum(d["debt_hours"] for d in active_debts), 2)
+            row["debt_balance"] = f"{current_debt_val:.2f}"
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
@@ -391,9 +391,9 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Вычисление финального долга на последнюю дату по каждой машине для фильтра и календаря
-    latest_debts = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"]
-    vehicles_with_debt = latest_debts[latest_debts > 0].index.tolist()
+    # Извлекаем числовое значение долга для фильтрации машин с долгом
+    latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
+    vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
 
     st.sidebar.markdown(
         "<div class='filter-card'><div class='filter-card-title'>"
@@ -594,7 +594,6 @@ if uploaded_file:
                 c_type = raw_df.loc[idx, "status_color"] if idx in raw_df.index else ""
                 h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
 
-                # Цветокодинг для ячейки «Отдых ДО смены (ч)»
                 cell_style = get_cell_style(c_type)
                 if not cell_style and pd.notna(h_val) and h_val >= 45.0:
                     cell_style = get_cell_style("blue")
@@ -603,7 +602,6 @@ if uploaded_file:
                     col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
                     styles[col_idx] = cell_style
 
-                # Подсветка строки синим, если пауза >= 24 часов
                 row_blue_style = "background-color: #DBEAFE; color: #1E3A8A;" if (pd.notna(h_val) and h_val >= 24.0) else ""
                 if row_blue_style:
                     for i, col_name in enumerate(df.columns):
@@ -664,11 +662,28 @@ if uploaded_file:
         if not filtered.empty:
             pivot_df = filtered.copy()
 
+            # Безопасная агрегация для предотвращения ошибок с пустыми значениями (NaN)
+            def safe_max_hours(x):
+                valid = x.dropna()
+                return valid.max() if not valid.empty else np.nan
+
+            def safe_display_text(x):
+                sub = pivot_df.loc[x.index, "display_text"].dropna()
+                return " / ".join(sub) if not sub.empty else ""
+
+            def safe_status_color(x):
+                sub_hours = pivot_df.loc[x.index, "rest_before_shift_hours"]
+                valid_hours = sub_hours.dropna()
+                if valid_hours.empty:
+                    return ""
+                max_idx = valid_hours.idxmax()
+                return pivot_df.loc[max_idx, "status_color"] if max_idx in pivot_df.index else ""
+
             grouped_matrix = (
                 pivot_df.groupby(["vehicle_name", "date"])
                 .agg({
-                    "rest_before_shift_hours": ["max", lambda x: " / ".join(pivot_df.loc[x.index, "display_text"])],
-                    "status_color": lambda x: pivot_df.loc[pivot_df.loc[x.index, "rest_before_shift_hours"].idxmax(), "status_color"]
+                    "rest_before_shift_hours": [safe_max_hours, safe_display_text],
+                    "status_color": safe_status_color
                 })
             )
             grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
@@ -678,8 +693,9 @@ if uploaded_file:
                 index="vehicle_name", columns="date", values="display_text"
             ).fillna("")
 
-            # Добавляем итоговый столбец «Компенсация» с актуальным долгом на последнюю дату
-            calendar_table["Компенсация"] = calendar_table.index.map(latest_debts).fillna(0.0)
+            # Добавляем столбец «Компенсация» с актуальным долгом на последнюю дату (формат с 2 знаками)
+            latest_debts_formatted = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"]
+            calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_formatted).fillna("0.00")
 
             new_column_names = {}
             for col in calendar_table.columns:
@@ -711,9 +727,11 @@ if uploaded_file:
                 
                 for orig_col, new_col in new_column_names.items():
                     if orig_col == "Компенсация":
-                        # Стилизуем итоговую колонку компенсации (например, выделяем жирным, если долг > 0)
                         for idx in calendar_table.index:
-                            val = latest_debts.get(idx, 0.0)
+                            try:
+                                val = float(latest_debts_formatted.get(idx, 0.0))
+                            except:
+                                val = 0.0
                             if val > 0:
                                 df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
                         continue
