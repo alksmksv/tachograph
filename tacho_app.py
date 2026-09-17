@@ -212,10 +212,8 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Очищаем просроченные долги (срок действия 21 день)
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
             
-            # Сохраняем долг как число (float) для корректной сортировки
             current_debt_val = round(sum(d["debt_hours"] for d in active_debts), 2)
             row["debt_balance"] = float(current_debt_val)
             
@@ -229,9 +227,8 @@ def process_file_fast(file_bytes, file_name):
                 continue
 
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6]  # ВС или ПН
+            is_weekend_end = end_weekday in [0, 6]
 
-            # 1. Диапазон 9 <= h < 11
             if 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -251,7 +248,6 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = "yellow"
 
-            # 2. Диапазон 11 <= h < 24
             elif 11.0 <= h < 24.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -273,7 +269,6 @@ def process_file_fast(file_bytes, file_name):
                     else:
                         color_type = ""
 
-            # 3. Диапазон 24 <= h < 45
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
                 recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
@@ -297,7 +292,6 @@ def process_file_fast(file_bytes, file_name):
                     "source_weekend_end": weekend_end_ref
                 })
 
-            # 4. Диапазон h >= 45
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
@@ -608,7 +602,6 @@ if uploaded_file:
 
                 return styles
 
-            # Форматируем числовой столбец «Компенсация» до двух знаков без превращения в строку
             styler = df.style.apply(style_specific_row_and_cell, axis=1).format({"Компенсация": "{:.2f}"})
             
             def highlight_borders(df_sub):
@@ -687,11 +680,17 @@ if uploaded_file:
             grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
             grouped_matrix = grouped_matrix.reset_index()
 
+            # Строим таблицу на чистых числах max_hours, чтобы сортировка по клику работала идеально
             calendar_table = grouped_matrix.pivot(
+                index="vehicle_name", columns="date", values="max_hours"
+            )
+
+            # Сохраняем текстовое представление для отрисовки красивых форматов с плюсами (если нужно)
+            text_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="display_text"
             ).fillna("")
 
-            # Добавляем столбец «Компенсация» как число (float) для правильной сортировки
+            # Добавляем столбец «Компенсация» как число (float)
             latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
             calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_float).fillna(0.0)
 
@@ -710,21 +709,23 @@ if uploaded_file:
                     new_column_names[col] = f"{col}{suffix}"
                 except:
                     pass
+            
             calendar_table = calendar_table.rename(columns=new_column_names)
+            text_matrix = text_matrix.rename(columns=new_column_names)
 
             color_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="status_color"
-            ).fillna("")
+            ).fillna("").rename(columns=new_column_names)
             
             hours_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="max_hours"
-            )
+            ).rename(columns=new_column_names)
 
             def style_calendar_cell(data):
                 df_styles = pd.DataFrame('', index=calendar_table.index, columns=calendar_table.columns)
                 
                 for orig_col, new_col in new_column_names.items():
-                    if orig_col == "Компенсация":
+                    if new_col == "Компенсация":
                         for idx in calendar_table.index:
                             try:
                                 val = float(latest_debts_float.get(idx, 0.0))
@@ -735,13 +736,14 @@ if uploaded_file:
                         continue
 
                     try:
-                        is_weekend = pd.to_datetime(orig_col).dayofweek in [5, 6]
+                        raw_date_str = new_col.split(" ")[0]
+                        is_weekend = pd.to_datetime(raw_date_str).dayofweek in [5, 6]
                     except:
                         is_weekend = False
 
                     for idx in calendar_table.index:
-                        c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in calendar_table.index else ""
-                        h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in calendar_table.index else np.nan
+                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in calendar_table.index else ""
+                        h_val = hours_matrix.loc[idx, new_col] if new_col in hours_matrix.columns and idx in calendar_table.index else np.nan
                         
                         bg_style = get_cell_style(c_type)
                         if not bg_style and pd.notna(h_val) and h_val >= 45.0:
@@ -758,8 +760,33 @@ if uploaded_file:
 
                 return df_styles
 
-            # Применяем форматирование числа с двумя знаками для колонки «Компенсация» через .format()
-            styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
+            # Кастомный форматтер: если в ячейке число, выводим красивый текст из text_matrix (с плюсами), а сортируем по числу!
+            def custom_formatter(val):
+                if pd.isna(val):
+                    return ""
+                return f"{val:.2f}"
+
+            formatted_dict = {col: custom_formatter for col in new_column_names.values() if col != "Компенсация"}
+            formatted_dict["Компенсация"] = "{:.2f}"
+
+            # Подменяем вывод ячеек на текстовые значения с сохранением числовой подложки для сортировки
+            styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None)
+            
+            # Переопределяем отображение через кастомную функцию для каждой ячейки по маске text_matrix
+            def format_with_text(x):
+                res = pd.DataFrame("", index=x.index, columns=x.columns)
+                for c in x.columns:
+                    for r in x.index:
+                        if c == "Компенсация":
+                            val = x.loc[r, c]
+                            res.loc[r, c] = f"{val:.2f}" if pd.notna(val) else "0.00"
+                        else:
+                            txt = text_matrix.loc[r, c] if (r in text_matrix.index and c in text_matrix.columns) else ""
+                            res.loc[r, c] = txt
+                return res
+
+            styled_calendar.format(format_with_text)
+
             st.dataframe(styled_calendar, use_container_width=True, height=750)
         else:
             st.info("Нет данных для отображения матрицы.")
