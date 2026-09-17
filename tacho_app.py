@@ -785,8 +785,8 @@ if uploaded_file:
                         display_calendar.loc[idx, col] = ""
 
             latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
-            display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0)
-            display_calendar["Компенсация"] = display_calendar["Компенсация"].apply(lambda x: f"{x:.2f}")
+            # Оставляем числовым типом float вместо принудительного .apply(lambda x: f"{x:.2f}")
+            display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
 
             new_column_names = {}
             for col in display_calendar.columns:
@@ -835,7 +835,8 @@ if uploaded_file:
 
                 return df_styles
 
-            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None)
+            # Применяем числовой формат через Styler.format
+            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
             st.dataframe(styled_calendar, use_container_width=True, height=750)
         else:
             st.info("Нет данных для отображения матрицы.")
