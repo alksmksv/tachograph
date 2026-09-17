@@ -96,14 +96,14 @@ st.markdown(
 # ==============================================================================
 def get_cell_style(color_type):
     if color_type == "blue":
-        return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"  # Синий (Выходной / Норма >=45ч)
+        return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"
     elif color_type == "yellow":
-        return "background-color: #FEF9C3; color: #713F12;"  # Желтый (Сокращенный отдых 24-45ч)
+        return "background-color: #FEF9C3; color: #713F12;"
     elif color_type == "green":
-        return "background-color: #DCFCE7; font-weight: bold; color: #166534;"  # Зеленый (Успешная компенсация)
+        return "background-color: #DCFCE7; font-weight: bold; color: #166534;"
     elif color_type == "red":
-        return "background-color: #FEE2E2; font-weight: bold; color: #991B1B;"  # Красный (Нарушение)
-    return ""  # Будние дни и пустые значения — без выделения
+        return "background-color: #FEE2E2; font-weight: bold; color: #991B1B;"
+    return ""
 
 
 # ==============================================================================
@@ -198,12 +198,10 @@ def process_file_fast(file_bytes, file_name):
     
     for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
         v_group = v_group.reset_index(drop=True)
-        
-        active_debts = []  # Накопленные долги за сокращенные еженедельные паузы
+        active_debts = []
         
         for idx, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
-            p_start = row["pause_start"]
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
@@ -216,61 +214,91 @@ def process_file_fast(file_bytes, file_name):
                 processed_rows.append(row)
                 continue
 
-            # ПРОВЕРКА ПО МАРКЕРУ ДНЯ ОКОНЧАНИЯ ПАУЗЫ (ВС = 6 или ПН = 0)
-            is_weekly_rest = False
-            if pd.notna(p_end):
-                if p_end.dayofweek in [0, 6]:  # Заканчивается в понедельник или воскресенье
-                    is_weekly_rest = True
+            end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
+            is_weekend_end = end_weekday in [0, 6]  # ВС или ПН
 
-            if not is_weekly_rest:
-                # --- БУДНИЕ ДНИ / МЕЖСМЕННЫЙ ОТДЫХ (заканчивается со ВТ по СБ) ---
-                if h < 9.0:
-                    color_type = "red"  # Нарушение (<9 часов)
-                elif 9.0 <= h < 11.0:
-                    # Проверка на количество сокращенных суточных за неделю (не более 3)
+            # 1. Диапазон 9 <= h < 11
+            if 9.0 <= h < 11.0:
+                if is_weekend_end:
+                    color_type = "red"
+                else:
                     w_start = row["week_start"]
                     week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
                     short_weekday_count_prior = 0
                     for _, p_row in v_group[week_shifts_mask].iterrows():
                         ph = p_row["rest_before_shift_hours"]
                         pe = p_row["pause_end"]
-                        if pd.notna(ph) and 9.0 <= ph < 11.0:
-                            if pd.isna(pe) or pe.dayofweek not in [0, 6]:
-                                short_weekday_count_prior += 1
+                        pe_wd = pe.dayofweek if pd.notna(pe) else 0
+                        if pd.notna(ph) and 9.0 <= ph < 11.0 and pe_wd not in [0, 6]:
+                            short_weekday_count_prior += 1
                     
                     if short_weekday_count_prior >= 3:
                         color_type = "red"
                     else:
                         color_type = "yellow"
+
+            # 2. Диапазон 11 <= h < 24
+            elif 11.0 <= h < 24.0:
+                if is_weekend_end:
+                    color_type = "red"
                 else:
-                    # Полноценный суточный отдых (>= 11 часов) в будни
-                    color_type = ""
-            else:
-                # --- ЕЖЕНЕДЕЛЬНЫЙ ОТДЫХ (заканчивается в ВС или ПН) ---
-                if h < 24.0:
-                    color_type = "red"  # Грубое нарушение еженедельного отдыха (< 24 часов)
-                elif 24.0 <= h < 45.0:
-                    # Сокращенный еженедельный отдых (24 - 45 часов) -> Желтый + фиксация долга
-                    color_type = "yellow"
-                    debt_val = 45.0 - h
-                    expiry_dt = shift_dt + pd.Timedelta(days=21) # Компенсация в течение 3 недель
-                    active_debts.append({"debt_hours": debt_val, "expiry_date": expiry_dt})
-                else:
-                    # Полноценный еженедельный отдых >= 45 часов (в т.ч. заканчивающийся в понедельник). Проверяем погашение долга
+                    # Проверяем возможность компенсации 11+h в будни (если долг возник строго с предшествующих выходных впритык)
+                    can_compensate_weekday = False
                     if active_debts:
                         oldest_debt = active_debts[0]
-                        required_hours = 45.0 + oldest_debt["debt_hours"]
-                        if h >= required_hours:
-                            H = h - 45.0
-                            color_type = "green"
-                            display_str = f"45+{H:.2f}"
-                            active_debts.pop(0)  # Долг успешно погашен единой компенсацией
-                        else:
-                            color_type = "blue"  # Качественный выходной, но долг еще не покрыт полностью
-                    else:
-                        color_type = "blue"  # Обычный полноценный выходной
+                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2) # СБ-ВС предыдущей недели
+                        if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
+                            can_compensate_weekday = True
 
-            # Очищаем просроченные долги
+                    req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate_weekday) else 0)
+                    
+                    if active_debts and can_compensate_weekday and h >= req_h:
+                        extra_h = h - 11.0
+                        color_type = "green"
+                        display_str = f"11+{extra_h:.2f}"
+                        active_debts.pop(0)
+                    else:
+                        color_type = ""
+
+            # 3. Диапазон 24 <= h < 45
+            elif 24.0 <= h < 45.0:
+                four_weeks_ago = shift_dt - pd.Timedelta(days=28)
+                recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
+                recent_short_count = 0
+                for _, p_row in v_group[recent_mask].iterrows():
+                    ph = p_row["rest_before_shift_hours"]
+                    if pd.notna(ph) and 24.0 <= ph < 45.0:
+                        recent_short_count += 1
+
+                if recent_short_count >= 2:
+                    color_type = "red"
+                else:
+                    color_type = "yellow"
+                    debt_val = 45.0 - h
+                    expiry_dt = shift_dt + pd.Timedelta(days=21)
+                    # Фиксируем дату окончания выходных, на которых возник долг
+                    weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                    active_debts.append({
+                        "debt_hours": debt_val, 
+                        "expiry_date": expiry_dt,
+                        "source_weekend_end": weekend_end_ref
+                    })
+
+            # 4. Диапазон h >= 45
+            elif h >= 45.0:
+                if active_debts:
+                    oldest_debt = active_debts[0]
+                    req_h = 45.0 + oldest_debt["debt_hours"]
+                    if h >= req_h:
+                        extra_h = h - 45.0
+                        color_type = "green"
+                        display_str = f"45+{extra_h:.2f}"
+                        active_debts.pop(0)
+                    else:
+                        color_type = "blue"
+                else:
+                    color_type = "blue"
+
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
 
             row["status_color"] = color_type
@@ -594,6 +622,7 @@ if uploaded_file:
             grouped_matrix = (
                 pivot_df.groupby(["vehicle_name", "date"])
                 .agg({
+                    "rest_before_shift_hours": "first",
                     "display_text": lambda x: " / ".join([str(v) for v in x if v != ""]),
                     "status_color": "last"
                 })
@@ -621,6 +650,10 @@ if uploaded_file:
             color_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="status_color"
             ).fillna("")
+            
+            hours_matrix = grouped_matrix.pivot(
+                index="vehicle_name", columns="date", values="rest_before_shift_hours"
+            )
 
             def style_calendar_cell(data):
                 df_styles = pd.DataFrame('', index=calendar_table.index, columns=calendar_table.columns)
@@ -633,7 +666,14 @@ if uploaded_file:
 
                     for idx in calendar_table.index:
                         c_type = color_matrix.loc[idx, orig_col] if orig_col in color_matrix.columns and idx in color_matrix.index else ""
+                        
+                        # Правило для Календаря: для остальных ячеек (если это не Отдых ДО смены, либо по общему правилу)
+                        # Здесь для Календаря сохраняется полная логика статус-цветов, но если нужно правило >24ч синим для ячеек без цвета:
+                        h_val = hours_matrix.loc[idx, orig_col] if orig_col in hours_matrix.columns and idx in hours_matrix.index else np.nan
+                        
                         bg_style = get_cell_style(c_type)
+                        if not bg_style and pd.notna(h_val) and h_val > 24.0:
+                            bg_style = get_cell_style("blue")
 
                         if is_weekend:
                             if not bg_style:
