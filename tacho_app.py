@@ -219,10 +219,12 @@ def process_file_fast(file_bytes, file_name):
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
+            violation_desc = ""
             
             if pd.isna(h):
                 row["status_color"] = ""
                 row["display_text"] = ""
+                row["violation_description"] = ""
                 processed_rows.append(row)
                 continue
 
@@ -232,6 +234,7 @@ def process_file_fast(file_bytes, file_name):
             if 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
+                    violation_desc = "Пауза 9-11 ч завершилась в воскресенье/понедельник (нарушение дня завершения)"
                 else:
                     w_start = row["week_start"]
                     week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
@@ -245,12 +248,15 @@ def process_file_fast(file_bytes, file_name):
                     
                     if short_weekday_count_prior >= 3:
                         color_type = "red"
+                        violation_desc = f"Превышен лимит сокращенных суточных пауз в неделю (уже {short_weekday_count_prior + 1}-я)"
                     else:
                         color_type = "yellow"
+                        violation_desc = f"Сокращенная суточная пауза ({short_weekday_count_prior + 1}-я за неделю)"
 
             elif 11.0 <= h < 24.0:
                 if is_weekend_end:
                     color_type = "red"
+                    violation_desc = "Обычная пауза 11+ завершилась в воскресенье/понедельник"
                 else:
                     can_compensate_weekday = False
                     if active_debts:
@@ -265,9 +271,11 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
+                        violation_desc = "Успешная компенсация долга за счет увеличенной паузы"
                         active_debts.pop(0)
                     else:
                         color_type = ""
+                        violation_desc = ""
 
             elif 24.0 <= h < 45.0:
                 four_weeks_ago = shift_dt - pd.Timedelta(days=28)
@@ -280,8 +288,10 @@ def process_file_fast(file_bytes, file_name):
 
                 if recent_short_count >= 2:
                     color_type = "red"
+                    violation_desc = f"Превышен лимит сокращенных еженедельных пауз за 4 недели (уже {recent_short_count + 1}-я)"
                 else:
                     color_type = "orange"
+                    violation_desc = f"Сокращенная еженедельная пауза (24-45 ч), возник долг {45.0 - h:.2f} ч"
 
                 debt_val = 45.0 - h
                 expiry_dt = shift_dt + pd.Timedelta(days=21)
@@ -300,16 +310,20 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
+                        violation_desc = "Успешная компенсация еженедельного долга"
                         active_debts.pop(0)
                     else:
                         color_type = "blue"
+                        violation_desc = "Полноценный еженедельный отдых (но долг полностью не покрыт)"
                 else:
                     color_type = "blue"
+                    violation_desc = ""
 
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
 
             row["status_color"] = color_type
             row["display_text"] = display_str
+            row["violation_description"] = violation_desc
             processed_rows.append(row)
 
     res_df = pd.DataFrame(processed_rows)
@@ -329,6 +343,7 @@ def process_file_fast(file_bytes, file_name):
         "rest_before_shift_hours",
         "display_text",
         "status_color",
+        "violation_description",
         "pause_start",
         "pause_end",
         "debt_balance",
@@ -405,6 +420,7 @@ if uploaded_file:
 
     st.sidebar.markdown("<div class='filter-card'>", unsafe_allow_html=True)
     only_debt_vehicles = st.sidebar.checkbox("⚠️ Только машины с долгом", value=False, key="only_debt_checkbox")
+    only_violations = st.sidebar.checkbox("🚨 Только машины с нарушениями", value=False, key="only_violations_checkbox")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
     def render_select_filter(label, options, key_prefix):
@@ -517,7 +533,7 @@ if uploaded_file:
 
     nav_page = st.radio(
         "Навигация",
-        options=["Main", "Calendar"],
+        options=["Main", "Calendar", "Violations"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -526,6 +542,9 @@ if uploaded_file:
 
     if only_debt_vehicles:
         mask &= daily_df["vehicle_name"].isin(vehicles_with_debt)
+        
+    if only_violations:
+        mask &= daily_df["status_color"] == "red"
 
     if isinstance(date_range, tuple) and len(date_range) == 2:
         mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
@@ -548,8 +567,9 @@ if uploaded_file:
 
     filtered = daily_df[mask].drop(columns=["dt_date"]).reset_index(drop=True)
 
-    if nav_page == "Main":
-        filtered_display = filtered.copy()
+    # Универсальная функция отображения таблицы
+    def render_data_table(data_to_render, title_prefix="Мониторинг смен"):
+        filtered_display = data_to_render.copy()
 
         display_df = filtered_display.drop(columns=["status_color"]).rename(
             columns={
@@ -562,6 +582,7 @@ if uploaded_file:
                 "rest_country_before_shift": "Страна отдыха ДО смены",
                 "rest_before_shift_hours": "_raw_hours",
                 "display_text": "Отдых ДО смены (ч)",
+                "violation_description": "Описание нарушения",
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
                 "debt_balance": "Компенсация",
@@ -620,7 +641,7 @@ if uploaded_file:
         col_h, col_b = st.columns([4, 1])
         with col_h:
             st.markdown(
-                "<div class='main-header' style='margin-top: 15px;'>Мониторинг смен (найдено:"
+                f"<div class='main-header' style='margin-top: 15px;'>{title_prefix} (найдено:"
                 f" {len(render_df)})</div>",
                 unsafe_allow_html=True,
             )
@@ -636,7 +657,7 @@ if uploaded_file:
                 )
 
         if not render_df.empty:
-            styled_display = apply_table_styling(render_df.head(500), filtered)
+            styled_display = apply_table_styling(render_df.head(500), data_to_render)
             st.dataframe(
                 styled_display,
                 use_container_width=True,
@@ -647,6 +668,23 @@ if uploaded_file:
                 st.caption(" Отображены первые 500 строк. Скачайте Excel для получения полного файла.")
         else:
             st.info("Данные не найдены.")
+
+    if nav_page == "Main":
+        render_data_table(filtered, "Мониторинг смен")
+
+    elif nav_page == "Violations":
+        # Логика для вкладки Нарушения: только строки с ошибками (status_color == 'red') 
+        # плюс строка последней даты, если там есть компенсация (> 0)
+        violations_mask = daily_df["status_color"] == "red"
+        
+        # Находим индекс последней даты для каждой машины в исходном daily_df
+        last_rows_indices = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").tail(1).index
+        last_rows_with_debt = daily_df.loc[last_rows_indices][daily_df.loc[last_rows_indices, "debt_balance"] > 0].index
+        
+        combined_violation_indices = daily_df[violations_mask].index.union(last_rows_with_debt)
+        violations_filtered = daily_df.loc[daily_df.index.isin(combined_violation_indices)].drop(columns=["dt_date"]).reset_index(drop=True)
+        
+        render_data_table(violations_filtered, "Журнал нарушений и активных долгов")
 
     elif nav_page == "Calendar":
         st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
@@ -680,17 +718,14 @@ if uploaded_file:
             grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
             grouped_matrix = grouped_matrix.reset_index()
 
-            # Строим таблицу на чистых числах max_hours, чтобы сортировка по клику работала идеально
             calendar_table = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="max_hours"
             )
 
-            # Сохраняем текстовое представление для отрисовки красивых форматов с плюсами (если нужно)
             text_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="display_text"
             ).fillna("")
 
-            # Добавляем столбец «Компенсация» как число (float)
             latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
             calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_float).fillna(0.0)
 
@@ -760,19 +795,8 @@ if uploaded_file:
 
                 return df_styles
 
-            # Кастомный форматтер: если в ячейке число, выводим красивый текст из text_matrix (с плюсами), а сортируем по числу!
-            def custom_formatter(val):
-                if pd.isna(val):
-                    return ""
-                return f"{val:.2f}"
-
-            formatted_dict = {col: custom_formatter for col in new_column_names.values() if col != "Компенсация"}
-            formatted_dict["Компенсация"] = "{:.2f}"
-
-            # Подменяем вывод ячеек на текстовые значения с сохранением числовой подложки для сортировки
             styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None)
             
-            # Переопределяем отображение через кастомную функцию для каждой ячейки по маске text_matrix
             def format_with_text(x):
                 res = pd.DataFrame("", index=x.index, columns=x.columns)
                 for c in x.columns:
