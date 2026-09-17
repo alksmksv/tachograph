@@ -263,7 +263,7 @@ def process_file_fast(file_bytes, file_name):
                     extra_h = h - 11.0
                     color_type = "green"
                     display_str = f"11+{extra_h:.2f}"
-                    violation_desc = f"Компенсация долга ({extra_h:.2f} ч)"
+                    violation_desc = "Компенсация долга"
                     active_debts.pop(0)
                 else:
                     color_type = ""
@@ -302,7 +302,7 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
-                        violation_desc = f"Компенсация долга ({extra_h:.2f} ч)"
+                        violation_desc = "Компенсация долга"
                         active_debts.pop(0)
                     else:
                         color_type = "blue"
