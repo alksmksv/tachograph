@@ -247,7 +247,7 @@ def process_file_fast(file_bytes, file_name):
                     violation_desc = f"Превышен лимит сокращенных суточных пауз в неделю (уже {short_weekday_count_prior + 1}-я)"
                 else:
                     color_type = "yellow"
-                    violation_desc = "" # Не нарушение
+                    violation_desc = f"Сокращенная суточная пауза ({h:.2f} ч)"
 
             elif 11.0 <= h < 24.0:
                 can_compensate_weekday = False
@@ -263,7 +263,7 @@ def process_file_fast(file_bytes, file_name):
                     extra_h = h - 11.0
                     color_type = "green"
                     display_str = f"11+{extra_h:.2f}"
-                    violation_desc = ""
+                    violation_desc = "Компенсация долга за сокращенную паузу"
                     active_debts.pop(0)
                 else:
                     color_type = ""
@@ -283,7 +283,7 @@ def process_file_fast(file_bytes, file_name):
                     violation_desc = f"Превышен лимит сокращенных еженедельных пауз за 4 недели (уже {recent_short_count + 1}-я)"
                 else:
                     color_type = "orange"
-                    violation_desc = "" # Оранжевое (сокращенная еженедельная) — штатная ситуация с возникновением долга, не нарушение
+                    violation_desc = f"Сокращенная еженедельная пауза — возникновение долга ({45.0 - h:.2f} ч)"
 
                 debt_val = 45.0 - h
                 expiry_dt = shift_dt + pd.Timedelta(days=21)
@@ -302,7 +302,7 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
-                        violation_desc = ""
+                        violation_desc = "Компенсация еженедельного долга"
                         active_debts.pop(0)
                     else:
                         color_type = "blue"
@@ -394,6 +394,7 @@ if uploaded_file:
 
     latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
+    vehicles_with_violations = daily_df[daily_df["status_color"] == "red"]["vehicle_name"].unique().tolist()
 
     st.sidebar.markdown(
         "<div class='filter-card'><div class='filter-card-title'>"
@@ -457,7 +458,12 @@ if uploaded_file:
         "Группы", daily_df["group"].unique(), "groups"
     )
     
-    available_vehicles = vehicles_with_debt if only_debt_vehicles else daily_df["vehicle_name"].unique()
+    available_vehicles = daily_df["vehicle_name"].unique()
+    if only_debt_vehicles:
+        available_vehicles = [v for v in available_vehicles if v in vehicles_with_debt]
+    if only_violations:
+        available_vehicles = [v for v in available_vehicles if v in vehicles_with_violations]
+
     selected_vehicles = render_select_filter(
         "Машины", available_vehicles, "vehicles"
     )
@@ -536,7 +542,7 @@ if uploaded_file:
         mask &= daily_df["vehicle_name"].isin(vehicles_with_debt)
         
     if only_violations:
-        mask &= daily_df["status_color"] == "red"
+        mask &= daily_df["vehicle_name"].isin(vehicles_with_violations)
 
     if isinstance(date_range, tuple) and len(date_range) == 2:
         mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
@@ -665,9 +671,7 @@ if uploaded_file:
         render_data_table(filtered, "Мониторинг смен")
 
     elif nav_page == "Violations":
-        # Нарушения: строго где статус red + строка последней даты, если там долг > 0
         violations_mask = daily_df["status_color"] == "red"
-        
         last_rows_indices = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").tail(1).index
         last_rows_with_debt = daily_df.loc[last_rows_indices][daily_df.loc[last_rows_indices, "debt_balance"] > 0].index
         
@@ -708,19 +712,31 @@ if uploaded_file:
             grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
             grouped_matrix = grouped_matrix.reset_index()
 
-            calendar_table = grouped_matrix.pivot(
-                index="vehicle_name", columns="date", values="max_hours"
-            )
-
             text_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="display_text"
             ).fillna("")
 
+            hours_matrix = grouped_matrix.pivot(
+                index="vehicle_name", columns="date", values="max_hours"
+            )
+
             latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
-            calendar_table["Компенсация"] = calendar_table.index.map(latest_debts_float).fillna(0.0)
+            
+            display_calendar = text_matrix.copy()
+            for col in hours_matrix.columns:
+                for idx in hours_matrix.index:
+                    h_val = hours_matrix.loc[idx, col]
+                    txt_val = text_matrix.loc[idx, col]
+                    if pd.notna(h_val):
+                        display_calendar.loc[idx, col] = txt_val if txt_val else f"{h_val:.2f}"
+                    else:
+                        display_calendar.loc[idx, col] = ""
+
+            display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0)
+            display_calendar["Компенсация"] = display_calendar["Компенсация"].apply(lambda x: f"{x:.2f}")
 
             new_column_names = {}
-            for col in calendar_table.columns:
+            for col in display_calendar.columns:
                 if col == "Компенсация":
                     new_column_names[col] = "Компенсация"
                     continue
@@ -735,23 +751,15 @@ if uploaded_file:
                 except:
                     pass
             
-            calendar_table = calendar_table.rename(columns=new_column_names)
-            text_matrix = text_matrix.rename(columns=new_column_names)
-
-            color_matrix = grouped_matrix.pivot(
-                index="vehicle_name", columns="date", values="status_color"
-            ).fillna("").rename(columns=new_column_names)
-            
-            hours_matrix = grouped_matrix.pivot(
-                index="vehicle_name", columns="date", values="max_hours"
-            ).rename(columns=new_column_names)
+            display_calendar = display_calendar.rename(columns=new_column_names)
+            color_matrix = grouped_matrix.pivot(index="vehicle_name", columns="date", values="status_color").fillna("").rename(columns=new_column_names)
 
             def style_calendar_cell(data):
-                df_styles = pd.DataFrame('', index=calendar_table.index, columns=calendar_table.columns)
+                df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
                 
-                for orig_col, new_col in new_column_names.items():
+                for new_col in display_calendar.columns:
                     if new_col == "Компенсация":
-                        for idx in calendar_table.index:
+                        for idx in display_calendar.index:
                             try:
                                 val = float(latest_debts_float.get(idx, 0.0))
                             except:
@@ -760,46 +768,21 @@ if uploaded_file:
                                 df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
                         continue
 
-                    try:
-                        raw_date_str = new_col.split(" ")[0]
-                        is_weekend = pd.to_datetime(raw_date_str).dayofweek in [5, 6]
-                    except:
-                        is_weekend = False
-
-                    for idx in calendar_table.index:
-                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in calendar_table.index else ""
-                        h_val = hours_matrix.loc[idx, new_col] if new_col in hours_matrix.columns and idx in calendar_table.index else np.nan
+                    for idx in display_calendar.index:
+                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in color_matrix.index else ""
+                        orig_col_key = [k for k, v in new_column_names.items() if v == new_col]
+                        h_val = hours_matrix.loc[idx, orig_col_key[0]] if orig_col_key and idx in hours_matrix.index and orig_col_key[0] in hours_matrix.columns else np.nan
                         
                         bg_style = get_cell_style(c_type)
                         if not bg_style and pd.notna(h_val) and h_val >= 45.0:
                             bg_style = get_cell_style("blue")
-
-                        if is_weekend:
-                            if not bg_style:
-                                bg_style = "background-color: #F8FAFC;"
-                            else:
-                                bg_style += " border-right: 2px dashed #94A3B8; border-left: 2px dashed #94A3B8;"
 
                         if bg_style:
                             df_styles.loc[idx, new_col] = bg_style
 
                 return df_styles
 
-            styled_calendar = calendar_table.style.apply(style_calendar_cell, axis=None)
-            
-            # Корректное заполнение текстов без вызова ошибки через format()
-            formatted_data = calendar_table.copy()
-            for c in formatted_data.columns:
-                for r in formatted_data.index:
-                    if c == "Компенсация":
-                        val = formatted_data.loc[r, c]
-                        formatted_data.loc[r, c] = f"{val:.2f}" if pd.notna(val) else "0.00"
-                    else:
-                        txt = text_matrix.loc[r, c] if (r in text_matrix.index and c in text_matrix.columns) else ""
-                        formatted_data.loc[r, c] = txt
-
-            styled_calendar.data = formatted_data
-
+            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None)
             st.dataframe(styled_calendar, use_container_width=True, height=750)
         else:
             st.info("Нет данных для отображения матрицы.")
