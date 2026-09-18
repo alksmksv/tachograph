@@ -102,6 +102,8 @@ def get_cell_style(color_type):
         return "background-color: #DCFCE7; font-weight: bold; color: #166534;"
     elif color_type == "red":
         return "background-color: #FEE2E2; font-weight: bold; color: #991B1B;"
+    elif color_type == "critical":
+        return "background-color: #7F1D1D; font-weight: bold; color: #FFFFFF;"
     return ""
 
 
@@ -228,41 +230,47 @@ def process_file_fast(file_bytes, file_name):
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
             is_weekend_end = end_weekday in [0, 6]
 
-            # 1. Сокращенная суточная пауза (9 - 11 ч)
-            if 9.0 <= h < 11.0:
+            total_debt_hours = sum(d["debt_hours"] for d in active_debts)
+
+            # 1. Критическое нарушение (< 9 часов)
+            if h < 9.0:
+                color_type = "critical"
+                violation_description = f"Критическое нарушение: Слишком короткая суточная пауза ({h:.2f} ч < 9.0 ч)"
+
+            # 2. Сокращенная суточная пауза (9 - 11 ч)
+            elif 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
-                    violation_description = "Сокращенная суточная пауза в воскресенье/понедельник"
+                    violation_description = "Нарушение: Сокращенная суточная пауза в воскресенье/понедельник"
                 else:
                     color_type = "yellow"
-                    violation_description = "Сокращенная суточная пауза"
+                    violation_description = "Сокращенная суточная пауза (будни)"
 
-            # 2. Пауза от 11 до 24 часов (компенсация 11+ посреди недели)
+            # 3. Пауза от 11 до 24 часов (Пакетный зачет 11+ посреди недели)
             elif 11.0 <= h < 24.0:
                 is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
-                if is_midweek_end and active_debts:
-                    oldest_debt = active_debts[0]
-                    req_h = 11.0 + oldest_debt["debt_hours"]
-                    if h >= req_h:
-                        extra_h = h - 11.0
-                        color_type = "green"
-                        display_str = f"11+{extra_h:.2f}"
-                        violation_description = "Компенсация долга"
-                        active_debts.pop(0)
+                req_h = 11.0 + total_debt_hours
+                if is_midweek_end and active_debts and h >= req_h:
+                    extra_h = h - 11.0
+                    color_type = "green"
+                    display_str = f"11+{extra_h:.2f}"
+                    violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
+                else:
+                    color_type = ""
+                    violation_description = ""
 
-            # 3. Пауза от 24 до 45 часов (сокращенная еженедельная -> рождает долг на выходных)
+            # 4. Пауза от 24 до 45 часов (Сокращенная еженедельная -> рождает долг)
             elif 24.0 <= h < 45.0:
                 is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
 
                 if is_midweek_end:
-                    # Посреди недели 24+ — обычная пауза без создания долга и без компенсаций
                     color_type = ""
                     violation_description = ""
                 else:
                     color_type = "orange"
-                    violation_description = "Сокращенная еженедельная пауза"
-
                     debt_val = 45.0 - h
+                    violation_description = f"Сокращенная еженедельная пауза. Создан долг: {debt_val:.2f} ч"
                     weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
                     
                     active_debts.append({
@@ -271,20 +279,15 @@ def process_file_fast(file_bytes, file_name):
                         "created_at": shift_dt
                     })
 
-            # 4. Полноценная пауза 45+ часов (компенсация на выходных)
+            # 5. Полноценная пауза 45+ часов (Пакетный зачет на выходных)
             elif h >= 45.0:
-                if active_debts:
-                    oldest_debt = active_debts[0]
-                    req_h = 45.0 + oldest_debt["debt_hours"]
-                    if h >= req_h:
-                        extra_h = h - 45.0
-                        color_type = "green"
-                        display_str = f"45+{extra_h:.2f}"
-                        violation_description = "Компенсация долга"
-                        active_debts.pop(0)  
-                    else:
-                        color_type = "blue"
-                        violation_description = ""
+                req_h = 45.0 + total_debt_hours
+                if active_debts and h >= req_h:
+                    extra_h = h - 45.0
+                    color_type = "green"
+                    display_str = f"45+{extra_h:.2f}"
+                    violation_description = f"Полноценная компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                 else:
                     color_type = "blue"
                     violation_description = ""
@@ -380,7 +383,6 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Дефолтный диапазон: ровно 4 недели (текущая и 3 предыдущие)
     max_dt_pd = pd.to_datetime(max_date)
     max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
     default_start_dt = max_week_start - pd.Timedelta(weeks=3)
@@ -389,7 +391,7 @@ if uploaded_file:
 
     latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
-    vehicles_with_violations = daily_df[daily_df["status_color"] == "red"]["vehicle_name"].unique().tolist()
+    vehicles_with_violations = daily_df[daily_df["status_color"].isin(["red", "critical"])]["vehicle_name"].unique().tolist()
 
     st.sidebar.markdown(
         "<div class='filter-card'><div class='filter-card-title'>"
