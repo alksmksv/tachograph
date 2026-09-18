@@ -243,7 +243,7 @@ def process_file_fast(file_bytes, file_name):
             elif 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
-                    violation_description = "Нарушение: Сокращенная суточная пауза в воскресенье/понедельник"
+                    violation_description = "Нарушение: Пауза менее 24 часов на выходных"
                 else:
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
