@@ -265,7 +265,7 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                        violation_description = f"Компенсация всего пакета долгов"
                         active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                     else:
                         color_type = ""
@@ -297,7 +297,7 @@ def process_file_fast(file_bytes, file_name):
                     extra_h = h - 45.0
                     color_type = "green"
                     display_str = f"45+{extra_h:.2f}"
-                    violation_description = f"Полноценная компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                    violation_description = f"Компенсация всего пакета долгов"
                     active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                 else:
                     color_type = "blue"
@@ -597,8 +597,8 @@ if uploaded_file:
                 "violation_description": "Комментарий",
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
-                "debt_balance": "Компенсация",
-                "debt_days_counter": "Дней компенсации",
+                "debt_balance": "Компенсация (ч.)",
+                "debt_days_counter": "Возраст долга",
             }
         )
 
@@ -637,8 +637,8 @@ if uploaded_file:
                 return styles
 
             styler = df.style.apply(style_specific_row_and_cell, axis=1).format({
-                "Компенсация": "{:.2f}",
-                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                "Компенсация (ч.)": "{:.2f}",
+                "Возраст долга": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
             })
             
             def highlight_borders(df_sub):
@@ -742,19 +742,19 @@ if uploaded_file:
             latest_debts_float = latest_row_per_vehicle["debt_balance"].astype(float)
             latest_days_float = latest_row_per_vehicle["debt_days_counter"].astype(float)
 
-            display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
-            display_calendar["Дней компенсации"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
+            display_calendar["Компенсация (ч.)"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
+            display_calendar["Возраст долга"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
 
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
-            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Дней компенсации"]]
-            cols_order = ["Группа"] + middle_cols + ["Компенсация", "Дней компенсации"]
+            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация (ч.)", "Возраст долга"]]
+            cols_order = ["Группа"] + middle_cols + ["Компенсация (ч.)", "Возраст долга"]
             display_calendar = display_calendar[cols_order]
 
             new_column_names = {}
             for col in display_calendar.columns:
-                if col in ["Группа", "Компенсация", "Дней компенсации"]:
+                if col in ["Группа", "Компенсация (ч.)", "Возраст долга"]:
                     new_column_names[col] = col
                     continue
                 try:
@@ -775,8 +775,8 @@ if uploaded_file:
                 df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
                 
                 for new_col in display_calendar.columns:
-                    if new_col in ["Группа", "Компенсация", "Дней компенсации"]:
-                        if new_col == "Компенсация":
+                    if new_col in ["Группа", "Компенсация (ч.)", "Возраст долга"]:
+                        if new_col == "Компенсация (ч.)":
                             for idx in display_calendar.index:
                                 try:
                                     val = float(latest_debts_float.get(idx, 0.0))
@@ -784,7 +784,7 @@ if uploaded_file:
                                     val = 0.0
                                 if val > 0:
                                     df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
-                        elif new_col == "Дней компенсации":
+                        elif new_col == "Возраст долга":
                             for idx in display_calendar.index:
                                 try:
                                     d_val = int(latest_days_float.get(idx, 0))
@@ -809,8 +809,8 @@ if uploaded_file:
                 return df_styles
 
             styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({
-                "Компенсация": "{:.2f}",
-                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                "Компенсация (ч.)": "{:.2f}",
+                "Возраст долга": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
             })
             
             st.dataframe(
@@ -825,7 +825,7 @@ if uploaded_file:
             st.info("Нет данных для отображения матрицы.")
 
     elif nav_page == "Compensation":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Компенсация машин</div>", unsafe_allow_html=True)
+        st.markdown("<div class='main-header' style='margin-top: 15px;'>Компенсация (ч.) машин</div>", unsafe_allow_html=True)
 
         latest_df = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name", as_index=False).last()
         
@@ -842,7 +842,7 @@ if uploaded_file:
         filtered_latest = latest_df[comp_mask]
 
         comp_df = filtered_latest[["group", "vehicle_name", "debt_balance", "debt_days_counter"]].copy()
-        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Дней компенсации"]
+        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Возраст долга"]
         comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
 
         col_h, col_b = st.columns([4, 1])
@@ -863,7 +863,7 @@ if uploaded_file:
             st.dataframe(
                 comp_df.style.format({
                     "Время компенсации": "{:.2f}",
-                    "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                    "Возраст долга": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
                 }),
                 use_container_width=True,
                 hide_index=True,
