@@ -199,6 +199,8 @@ def process_file_fast(file_bytes, file_name):
     for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
         v_group = v_group.reset_index(drop=True)
         active_debts = []
+        weekly_reduced_daily_count = {}
+        reduced_weekly_pause_timestamps = []
         
         for idx, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
@@ -246,39 +248,60 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
 
-            # 3. Пауза от 11 часов и выше (Вт–Сб): Схема 11+ без верхних ограничений
+                # Лимит: не более 3 сокращенных суточных пауз за календарную неделю
+                week_key = row["week_start"]
+                weekly_reduced_daily_count[week_key] = weekly_reduced_daily_count.get(week_key, 0) + 1
+                if weekly_reduced_daily_count[week_key] >= 4:
+                    color_type = "red"
+                    violation_description = "Превышение лимита сокращенных суточных пауз в неделю"
+
+            # 3. Пауза от 11 часов и выше
             elif h >= 11.0:
                 is_weekend_end = end_weekday in [0, 6]  # Вс (6) или Пн (0)
-                
-                if is_weekend_end:
-                    # Если пауза выпала на Вс/Пн
+
+                if h >= 45.0:
+                    # Полноценная еженедельная пауза (45+) — гасит весь пакет долгов.
+                    # Работает для ЛЮБОГО дня недели, не только для Вс/Пн.
+                    req_h = 45.0 + total_debt_hours
+                    if active_debts and h >= req_h:
+                        extra_h = h - 45.0
+                        color_type = "green"
+                        display_str = f"45+{extra_h:.2f}"
+                        violation_description = "Компенсация всего пакета долгов"
+                        active_debts.clear()
+                    else:
+                        color_type = "blue"
+                        violation_description = ""
+
+                elif is_weekend_end:
+                    # Сокращенная пауза (11–45ч), выпавшая на Вс/Пн
                     if h < 24.0:
                         color_type = "red"
                         violation_description = "Нарушение: Пауза менее 24 часов на выходных"
-                    elif 24.0 <= h < 45.0:
+                    else:  # 24.0 <= h < 45.0
                         color_type = "orange"
                         debt_val = 45.0 - h
                         violation_description = "Сокращенная еженедельная пауза. Создан долг"
                         weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
                         active_debts.append({
-                            "debt_hours": debt_val, 
+                            "debt_hours": debt_val,
                             "source_weekend_end": weekend_end_ref,
                             "created_at": shift_dt
                         })
-                    else:
-                        # Полноценная пауза 45+ в Вс/Пн — гасит весь пакет долгов
-                        req_h = 45.0 + total_debt_hours
-                        if active_debts and h >= req_h:
-                            extra_h = h - 45.0
-                            color_type = "green"
-                            display_str = f"45+{extra_h:.2f}"
-                            violation_description = f"Компенсация всего пакета долгов"
-                            active_debts.clear()
-                        else:
-                            color_type = "blue"
-                            violation_description = ""
+
+                        # Лимит: не более 2 сокращенных еженедельных пауз (24–45ч, Вс/Пн)
+                        # в скользящем окне 4 недель (28 дней). Долг создаётся как обычно.
+                        reduced_weekly_pause_timestamps[:] = [
+                            t for t in reduced_weekly_pause_timestamps if t >= four_weeks_ago_limit
+                        ]
+                        occurrence_count = len(reduced_weekly_pause_timestamps) + 1
+                        reduced_weekly_pause_timestamps.append(shift_dt)
+                        if occurrence_count >= 3:
+                            color_type = "red"
+                            violation_description = "Превышение лимита сокращенных еженедельных пауз за период 4 недель"
+
                 else:
-                    # Вт, Ср, Чт, Пт, Сб — ВСЕГДА проверяем схему 11+ для любой паузы от 11 часов!
+                    # Вт, Ср, Чт, Пт, Сб — схема 11+ для паузы 11–45ч
                     max_debt_age_days = 0
                     if active_debts:
                         oldest_dt = min(d["created_at"] for d in active_debts)
@@ -289,43 +312,11 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_description = f"Компенсация всего пакета долгов"
+                        violation_description = "Компенсация всего пакета долгов"
                         active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                     else:
                         color_type = ""
                         violation_description = ""
-                        
-            # 4. Пауза от 24 до 45 часов (Сокращенная еженедельная -> рождает долг)
-            elif 24.0 <= h < 45.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
-
-                if is_midweek_end:
-                    color_type = ""
-                    violation_description = ""
-                else:
-                    color_type = "orange"
-                    debt_val = 45.0 - h
-                    violation_description = "Сокращенная еженедельная пауза. Создан долг"
-                    weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
-                    
-                    active_debts.append({
-                        "debt_hours": debt_val, 
-                        "source_weekend_end": weekend_end_ref,
-                        "created_at": shift_dt
-                    })
-
-            # 5. Полноценная пауза 45+ часов (Пакетный зачет в Вс/Пн)
-            elif h >= 45.0:
-                req_h = 45.0 + total_debt_hours
-                if is_weekend_end and active_debts and h >= req_h:
-                    extra_h = h - 45.0
-                    color_type = "green"
-                    display_str = f"45+{extra_h:.2f}"
-                    violation_description = f"Компенсация всего пакета долгов"
-                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
-                else:
-                    color_type = "blue"
-                    violation_description = ""
 
             # Финальная проверка окна 4 недель для актуальных долгов
             active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
