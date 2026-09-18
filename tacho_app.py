@@ -272,7 +272,7 @@ def process_file_fast(file_bytes, file_name):
                             extra_h = h - 45.0
                             color_type = "green"
                             display_str = f"45+{extra_h:.2f}"
-                            violation_description = f"Полноценная компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                            violation_description = f"Компенсация всего пакета долгов"
                             active_debts.clear()
                         else:
                             color_type = "blue"
@@ -289,7 +289,7 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                        violation_description = f"Компенсация всего пакета долгов"
                         active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                     else:
                         color_type = ""
