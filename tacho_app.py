@@ -246,15 +246,39 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
 
-            # 3. Пауза от 11 до 24 часов (Пакетный зачет 11+ посреди недели ИЛИ нарушение на выходных)
-            elif 11.0 <= h < 24.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5] # Вт, Ср, Чт, Пт, Сб
+            # 3. Пауза от 11 часов и выше (Вт–Сб): Схема 11+ без верхних ограничений
+            elif h >= 11.0:
+                is_weekend_end = end_weekday in [0, 6]  # Вс (6) или Пн (0)
                 
                 if is_weekend_end:
-                    color_type = "red"
-                    violation_description = "Нарушение: Пауза менее 24 часов на выходных"
+                    # Если пауза выпала на Вс/Пн
+                    if h < 24.0:
+                        color_type = "red"
+                        violation_description = "Нарушение: Пауза менее 24 часов на выходных"
+                    elif 24.0 <= h < 45.0:
+                        color_type = "orange"
+                        debt_val = 45.0 - h
+                        violation_description = "Сокращенная еженедельная пауза. Создан долг"
+                        weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                        active_debts.append({
+                            "debt_hours": debt_val, 
+                            "source_weekend_end": weekend_end_ref,
+                            "created_at": shift_dt
+                        })
+                    else:
+                        # Полноценная пауза 45+ в Вс/Пн — гасит весь пакет долгов
+                        req_h = 45.0 + total_debt_hours
+                        if active_debts and h >= req_h:
+                            extra_h = h - 45.0
+                            color_type = "green"
+                            display_str = f"45+{extra_h:.2f}"
+                            violation_description = f"Полноценная компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                            active_debts.clear()
+                        else:
+                            color_type = "blue"
+                            violation_description = ""
                 else:
-                    # Проверяем возраст долгов для схемы 11+ (не старше 7 дней)
+                    # Вт, Ср, Чт, Пт, Сб — ВСЕГДА проверяем схему 11+ для любой паузы от 11 часов!
                     max_debt_age_days = 0
                     if active_debts:
                         oldest_dt = min(d["created_at"] for d in active_debts)
@@ -265,12 +289,12 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_description = f"Компенсация всего пакета долгов"
+                        violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
                         active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
                     else:
                         color_type = ""
                         violation_description = ""
-
+                        
             # 4. Пауза от 24 до 45 часов (Сокращенная еженедельная -> рождает долг)
             elif 24.0 <= h < 45.0:
                 is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
