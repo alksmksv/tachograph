@@ -3,24 +3,32 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ==============================================================================
+# БЛОК 1: ИНИЦИАЛИЗАЦИЯ И ГЛОБАЛЬНЫЕ СТИЛИ
+# ==============================================================================
+
+# Настраиваем конфигурацию страницы Streamlit: делаем макет широким (wide) 
+# и задаем заголовок вкладки в браузере.
 st.set_page_config(layout="wide", page_title="Мониторинг смен РТО")
 
-# ==============================================================================
-# CSS-СТИЛИ
-# ==============================================================================
+# Инъекция кастомных CSS-стилей для управления внешним видом элементов интерфейса
 st.markdown(
     """
 <style>
+    /* Основной фон всего приложения (светло-серый оттенок) */
     .stApp { background-color: #F1F5F9; }
     
+    /* Стилизация боковой панели (Sidebar): белый фон и правая граница */
     section[data-testid="stSidebar"] {
         background-color: #FFFFFF !important;
         border-right: 1px solid #CBD5E1 !important;
     }
+    /* Внутренние отступы контейнера сайдбара */
     section[data-testid="stSidebar"] .block-container {
         padding: 0.4rem !important;
     }
 
+    /* Визуальная карточка-контейнер для каждого фильтра в сайдбаре */
     .filter-card {
         border: 1px solid #CBD5E1;
         background-color: #F8FAFC;
@@ -28,6 +36,7 @@ st.markdown(
         padding: 4px 6px;
         margin-bottom: 5px;
     }
+    /* Заголовок внутри карточки фильтра */
     .filter-card-title {
         font-size: 11px;
         font-weight: 700;
@@ -35,6 +44,7 @@ st.markdown(
         margin-bottom: 2px;
     }
 
+    /* Оформление выбранных тегов (плашек) в мультиселектах */
     [data-baseweb="tag"] {
         background-color: #2563EB !important;
         border-radius: 3px !important;
@@ -49,6 +59,7 @@ st.markdown(
         font-size: 10px !important;
     }
 
+    /* Универсальные стили рамок, шрифтов и полей для инпутов */
     div[data-baseweb="select"] > div, 
     div[data-testid="stNumberInput"] input,
     div[data-testid="stDateInput"] input {
@@ -61,10 +72,12 @@ st.markdown(
         padding-bottom: 0px !important;
     }
 
+    /* Скрываем стандартные текстовые метки (label) над элементами в сайдбаре для компактности */
     div[data-testid="stSidebar"] label {
         display: none !important;
     }
     
+    /* Стилизация кнопок внутри боковой панели */
     div[data-testid="stSidebar"] button {
         background-color: #1E3A8A !important;
         color: white !important;
@@ -79,6 +92,7 @@ st.markdown(
         background-color: #1E40AF !important;
     }
     
+    /* Главный заголовок разделов интерфейса */
     .main-header {
         font-size: 18px;
         font-weight: 700;
@@ -92,6 +106,10 @@ st.markdown(
 
 
 def get_cell_style(color_type):
+    """
+    Функция возвращает CSS-стиль оформления ячейки таблицы 
+    в зависимости от типа зоны нарушения или статуса РТО.
+    """
     if color_type == "blue":
         return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"
     elif color_type == "yellow":
@@ -107,13 +125,22 @@ def get_cell_style(color_type):
     return ""
 
 
+# ==============================================================================
+# БЛОК 2: ЯДРО ОБРАБОТКИ ДАННЫХ И РАСЧЕТ РТО С ПАКЕТНЫМ ПОГАШЕНИЕМ
+# ==============================================================================
+
 @st.cache_data(show_spinner="Обработка файла и проверка РТО...")
 def process_file_fast(file_bytes, file_name):
+    """
+    Основная функция загрузки, очистки и расчетов РТО. 
+    Принимает байты файла и возвращает обработанный DataFrame.
+    """
     if file_name.endswith(".csv"):
         df = pd.read_csv(io.BytesIO(file_bytes))
     else:
         df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
+    # Формируем штампы времени начала и конца активностей
     df["start_datetime"] = pd.to_datetime(
         df["start_date"].astype(str) + " " + df["start_time"].astype(str)
     )
@@ -136,6 +163,7 @@ def process_file_fast(file_bytes, file_name):
     act_type = df["activity_type"].astype(str).str.upper()
     dur_min = df["duration_minutes"].fillna(0)
 
+    # Определяем полноценный отдых (RESTING или CARDLESS от 9 часов / 540 минут)
     is_rest = act_type.isin(["RESTING", "CARDLESS"]) & (dur_min >= 540)
 
     change_group = (
@@ -196,16 +224,17 @@ def process_file_fast(file_bytes, file_name):
 
     processed_rows = []
     
+    # Цикл обработки по каждой машине (аккумулируем очередь долгов)
     for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
         v_group = v_group.reset_index(drop=True)
-        active_debts = []
+        active_debts = []  # Очередь накопленных долгов
         
         for idx, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Строгое правило 4 недель (28 дней): отсекаем долги старше 28 дней
+            # Рулетка 4 недель (28 дней): удаляем долги старше 28 дней
             four_weeks_ago_limit = shift_dt - pd.Timedelta(days=28)
             active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
             
@@ -228,16 +257,17 @@ def process_file_fast(file_bytes, file_name):
                 continue
 
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6]
+            is_weekend_end = end_weekday in [0, 6]  # Вс или Пн
+            is_midweek_end = end_weekday in [1, 2, 3, 4, 5]  # Вт – Сб
 
             total_debt_hours = sum(d["debt_hours"] for d in active_debts)
 
-            # 1. Критическое нарушение (< 9 часов)
+            # 1. Критическое нарушение: пауза меньше 9 часов
             if h < 9.0:
                 color_type = "critical"
-                violation_description = f"Критическое нарушение: Слишком короткая суточная пауза ({h:.2f} ч < 9.0 ч)"
+                violation_description = "Критическое нарушение: Слишком короткая суточная пауза (менее 9 часов)"
 
-            # 2. Сокращенная суточная пауза (9 - 11 ч)
+            # 2. Сокращенная суточная пауза: от 9 до 11 часов
             elif 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -246,623 +276,286 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
 
-            # 3. Пауза от 11 до 24 часов (Пакетный зачет 11+ посреди недели)
-            elif 11.0 <= h < 24.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
-                req_h = 11.0 + total_debt_hours
-                if is_midweek_end and active_debts and h >= req_h:
-                    extra_h = h - 11.0
-                    color_type = "green"
-                    display_str = f"11+{extra_h:.2f}"
-                    violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
-                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
-                else:
-                    color_type = ""
-                    violation_description = ""
-
-            # 4. Пауза от 24 до 45 часов (Сокращенная еженедельная -> рождает долг)
-            elif 24.0 <= h < 45.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
-
+            # 3. Пауза от 11 часов и более (Разделение по дням недели и пакетное погашение)
+            elif h >= 11.0:
                 if is_midweek_end:
-                    color_type = ""
-                    violation_description = ""
-                else:
-                    color_type = "orange"
-                    debt_val = 45.0 - h
-                    violation_description = f"Сокращенная еженедельная пауза. Создан долг: {debt_val:.2f} ч"
-                    weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                    # Вт, Ср, Чт, Пт, Сб: схема 11+ (возраст долгов ДО 7 дней включительно)
+                    req_h = 11.0 + total_debt_hours
+                    max_debt_age_11 = 7
+                    all_debts_are_fresh = all(
+                        (shift_dt.normalize() - d["created_at"].normalize()).days <= max_debt_age_11 
+                        for d in active_debts
+                    )
                     
-                    active_debts.append({
-                        "debt_hours": debt_val, 
-                        "source_weekend_end": weekend_end_ref,
-                        "created_at": shift_dt
-                    })
+                    if active_debts and h >= req_h and all_debts_are_fresh:
+                        extra_h = h - 11.0
+                        color_type = "green"
+                        display_str = f"11+{extra_h:.2f}"
+                        violation_description = "Компенсация всего пакета долгов (11+)"
+                        active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ СУММЫ РАЗОМ
+                    else:
+                        color_type = ""
+                        violation_description = ""
+                
+                else:  # Это Вс или Пн
+                    if h < 24.0:
+                        color_type = "red"
+                        violation_description = "Нарушение: Пауза менее 24 часов на выходных"
+                    elif 24.0 <= h < 45.0:
+                        # Сокращенная еженедельная на выходных — рождает новый долг
+                        color_type = "orange"
+                        debt_val = 45.0 - h  
+                        violation_description = "Сокращенная еженедельная пауза (создан долг)"
+                        weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                        
+                        active_debts.append({
+                            "debt_hours": debt_val, 
+                            "source_weekend_end": weekend_end_ref,
+                            "created_at": shift_dt
+                        })
+                    else:  # h >= 45.0 на выходных
+                        # Вс, Пн: схема 45+ (возраст долгов ДО 28 дней)
+                        req_h = 45.0 + total_debt_hours
+                        max_debt_age_45 = 28
+                        all_debts_are_valid = all(
+                            (shift_dt.normalize() - d["created_at"].normalize()).days <= max_debt_age_45 
+                            for d in active_debts
+                        )
+                        
+                        if active_debts and h >= req_h and all_debts_are_valid:
+                            extra_h = h - 45.0
+                            color_type = "green"
+                            display_str = f"45+{extra_h:.2f}"
+                            violation_description = "Полноценная компенсация всего пакета долгов (45+)"
+                            active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ СУММЫ РАЗОМ
+                        else:
+                            color_type = "blue"
+                            violation_description = ""
 
-            # 5. Полноценная пауза 45+ часов (Пакетный зачет на выходных)
-            elif h >= 45.0:
-                req_h = 45.0 + total_debt_hours
-                if active_debts and h >= req_h:
-                    extra_h = h - 45.0
-                    color_type = "green"
-                    display_str = f"45+{extra_h:.2f}"
-                    violation_description = f"Полноценная компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
-                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
-                else:
-                    color_type = "blue"
-                    violation_description = ""
-
-            # Финальная проверка окна 4 недель для актуальных долгов
-            active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
-
+            row["status_color"] = color_type
+            row["display_text"] = display_str
+            row["violation_description"] = violation_description
+            
             debt_bal = float(sum(d["debt_hours"] for d in active_debts))
             row["debt_balance"] = debt_bal
+            
             if active_debts and debt_bal > 0:
                 oldest_debt = active_debts[0]
                 row["debt_days_counter"] = (shift_dt.normalize() - oldest_debt["created_at"].normalize()).days + 1
             else:
                 row["debt_days_counter"] = 0
-
-            row["status_color"] = color_type
-            row["display_text"] = display_str
-            row["violation_description"] = violation_description
+                
             processed_rows.append(row)
 
     res_df = pd.DataFrame(processed_rows)
-    
     res_df["pause_start"] = pd.to_datetime(res_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
     res_df["pause_end"] = pd.to_datetime(res_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
 
     cols = [
-        "dt_date",
-        "date",
-        "weekday",
-        "group",
-        "vehicle_country",
-        "vehicle_name",
-        "driver_name",
-        "rest_country_before_shift",
-        "rest_before_shift_hours",
-        "display_text",
-        "status_color",
-        "violation_description",
-        "pause_start",
-        "pause_end",
-        "debt_balance",
-        "debt_days_counter",
+        "dt_date", "date", "weekday", "group", "vehicle_country", "vehicle_name",
+        "driver_name", "rest_country_before_shift", "rest_before_shift_hours",
+        "display_text", "status_color", "violation_description", "pause_start",
+        "pause_end", "debt_balance", "debt_days_counter",
     ]
     return res_df[cols]
 
 
-@st.cache_data
+# ==============================================================================
+# БЛОК 3: ВСПОМОГАТЕЛЬНЫЕ УТИЛИТЫ И ЭКСПОРТ
+# ==============================================================================
+
 def convert_df_to_excel(df):
+    """Конвертирует DataFrame в байтовый Excel-файл для скачивания."""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Мониторинг смен")
-        worksheet = writer.sheets["Мониторинг смен"]
-        for col in worksheet.columns:
-            max_len = max(len(str(cell.value or "")) for cell in col)
-            col_letter = col[0].column_letter
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='РТО_Мониторинг')
     return output.getvalue()
 
 
-def reset_select_key(key, values):
-    st.session_state[key] = values
-
-
-def reset_range_key(min_k, max_k, max_val):
-    st.session_state[min_k] = 0.0
-    st.session_state[max_k] = float(max_val)
-
-
-def reset_all_filters():
-    for k in list(st.session_state.keys()):
-        if k != "process_file_fast":
-            del st.session_state[k]
-
-
 # ==============================================================================
-# ИНТЕРФЕЙС
+# БЛОК 4: ИНТЕРФЕЙС ПОЛЬЗОВАТЕЛЯ И ПАНЕЛЬ ФИЛЬТРОВ (SIDEBAR)
 # ==============================================================================
-st.sidebar.markdown(
-    "<div style='font-size:13px; font-weight:700; margin-bottom:6px;"
-    " color:#0F172A;'>⚙️ Фильтры поиска</div>",
-    unsafe_allow_html=True,
-)
 
-with st.sidebar.expander("📁 Файл данных", expanded=True):
-    uploaded_file = st.file_uploader(
-        "Загрузите CSV/XLSX", type=["xlsx", "csv"], label_visibility="collapsed"
-    )
+with st.sidebar:
+    st.markdown('<div class="main-header">Параметры и фильтры</div>', unsafe_allow_html=True)
 
-if uploaded_file:
+    uploaded_file = st.file_uploader("Загрузить файл данных", type=["csv", "xlsx"])
+    if uploaded_file is None:
+        st.info("Пожалуйста, загрузите файл с данными (CSV или XLSX) для начала работы.")
+        st.stop()
+
     file_bytes = uploaded_file.getvalue()
-    daily_df = process_file_fast(file_bytes, uploaded_file.name)
+    df = process_file_fast(file_bytes, uploaded_file.name)
 
-    min_date = daily_df["dt_date"].min()
-    max_date = daily_df["dt_date"].max()
+    if df.empty:
+        st.warning("В загруженном файле нет данных для анализа.")
+        st.stop()
 
-    max_dt_pd = pd.to_datetime(max_date)
-    max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
-    default_start_dt = max_week_start - pd.Timedelta(weeks=3)
-    default_start_date = max(min_date, default_start_dt.date())
-    default_end_date = max_date
+    df["dt_date"] = pd.to_datetime(df["dt_date"])
 
-    latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
-    vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
-    vehicles_with_violations = daily_df[daily_df["status_color"].isin(["red", "critical"])]["vehicle_name"].unique().tolist()
-
-    st.sidebar.markdown(
-        "<div class='filter-card'><div class='filter-card-title'>"
-        "Период дат</div>",
-        unsafe_allow_html=True,
-    )
-    date_range = st.sidebar.date_input(
-        "Период",
-        value=(default_start_date, default_end_date),
-        min_value=min_date,
-        max_value=max_date,
-        key="date_range",
-        label_visibility="collapsed",
-    )
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
-
-    st.sidebar.markdown("<div class='filter-card'>", unsafe_allow_html=True)
-    only_debt_vehicles = st.sidebar.checkbox("⚠️ Только машины с долгом", value=False, key="only_debt_checkbox")
-    only_violations = st.sidebar.checkbox("🚨 Только машины с нарушениями", value=False, key="only_violations_checkbox")
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
-
-    def render_select_filter(label, options, key_prefix):
-        sel_key = f"{key_prefix}_select"
-        all_opts = sorted(list(set([str(x) for x in options if pd.notna(x) and str(x).strip() != ""])))
-
-        st.sidebar.markdown(
-            f"<div class='filter-card'><div"
-            f" class='filter-card-title'>{label}</div>",
-            unsafe_allow_html=True,
-        )
-
-        b1, b2 = st.sidebar.columns(2)
-        b1.button(
-            "Все",
-            key=f"{key_prefix}_all",
-            on_click=reset_select_key,
-            args=(sel_key, all_opts),
-        )
-        b2.button(
-            "✖ Сброс",
-            key=f"{key_prefix}_clr",
-            on_click=reset_select_key,
-            args=(sel_key, []),
-        )
-
-        selected = st.sidebar.multiselect(
-            label,
-            options=all_opts,
-            key=sel_key,
-            label_visibility="collapsed",
-            placeholder="Выберите...",
-        )
-
-        st.sidebar.markdown("</div>", unsafe_allow_html=True)
-        return selected
-
-    selected_vehicle_countries = render_select_filter(
-        "Страна авто", ["CZ", "SK", "Other"], "v_countries"
-    )
-    selected_groups = render_select_filter(
-        "Группы", daily_df["group"].unique(), "groups"
-    )
-    
-    available_vehicles = daily_df["vehicle_name"].unique()
-    if only_debt_vehicles:
-        available_vehicles = [v for v in available_vehicles if v in vehicles_with_debt]
-    if only_violations:
-        available_vehicles = [v for v in available_vehicles if v in vehicles_with_violations]
-
-    selected_vehicles = render_select_filter(
-        "Машины", available_vehicles, "vehicles"
-    )
-    
-    selected_drivers = render_select_filter(
-        "Водители", daily_df["driver_name"].unique(), "drivers"
-    )
-    selected_countries = render_select_filter(
-        "Страна отдыха ДО смены",
-        daily_df["rest_country_before_shift"].unique(),
-        "countries",
-    )
-    selected_comments = render_select_filter(
-        "Комментарий",
-        daily_df["violation_description"].unique(),
-        "comments",
-    )
-
-    def render_range_filter(label, max_val, key_prefix, step=0.5, unit="ч"):
-        min_k, max_k = f"{key_prefix}_min", f"{key_prefix}_max"
-
-        if min_k not in st.session_state:
-            st.session_state[min_k] = 0.0
-        if max_k not in st.session_state:
-            st.session_state[max_k] = float(max_val)
-
-        st.sidebar.markdown(
-            f"<div class='filter-card'><div class='filter-card-title'>{label}"
-            f" ({unit})</div>",
-            unsafe_allow_html=True,
-        )
-
-        c1, c2, c3 = st.sidebar.columns([2, 2, 1])
-        v_min = c1.number_input(
-            "От",
-            min_value=0.0,
-            max_value=float(max_val),
-            step=step,
-            key=min_k,
-            label_visibility="collapsed",
-        )
-        v_max = c2.number_input(
-            "До",
-            min_value=0.0,
-            max_value=float(max_val),
-            step=step,
-            key=max_k,
-            label_visibility="collapsed",
-        )
-        c3.button(
-            "✖",
-            key=f"{key_prefix}_rst",
-            on_click=reset_range_key,
-            args=(min_k, max_k, max_val),
-        )
-
-        st.sidebar.markdown("</div>", unsafe_allow_html=True)
-        return v_min, v_max
-
-    max_rest = max(
-        float(daily_df["rest_before_shift_hours"].max() or 24.0) + 1.0, 10.0
-    )
-    rest_min, rest_max = render_range_filter("Отдых ДО смены", max_rest, "rest")
-
-    st.sidebar.button(
-        "🔄 Сбросить ВСЕ фильтры",
-        use_container_width=True,
-        on_click=reset_all_filters,
-    )
-
-    nav_page = st.radio(
-        "Навигация",
-        options=["Main", "Calendar", "Compensation"],
-        horizontal=True,
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Раздел приложения</div>', unsafe_allow_html=True)
+    page = st.radio(
+        "Раздел", 
+        ["Main (Таблица)", "Calendar (Матрица)", "Compensation (Отчет)"], 
         label_visibility="collapsed"
     )
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    mask = pd.Series(True, index=daily_df.index)
+    min_d = df["dt_date"].min().date()
+    max_d = df["dt_date"].max().date()
+    
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Период дат</div>', unsafe_allow_html=True)
+    date_range = st.date_input("Период", [min_d, max_d], label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    if only_debt_vehicles:
-        mask &= daily_df["vehicle_name"].isin(vehicles_with_debt)
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Быстрые фильтры</div>', unsafe_allow_html=True)
+    only_with_debt = st.checkbox("Только с долгом (> 0 ч)")
+    only_violations = st.checkbox("Только с нарушениями")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    all_groups = sorted(df["group"].dropna().unique().tolist())
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Группа</div>', unsafe_allow_html=True)
+    selected_groups = st.multiselect("Группа", all_groups, default=all_groups, label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    all_veh_countries = sorted(df["vehicle_country"].dropna().unique().tolist())
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Страна ТС</div>', unsafe_allow_html=True)
+    selected_veh_countries = st.multiselect("Страна ТС", all_veh_countries, default=all_veh_countries, label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    all_vehicles = sorted(df["vehicle_name"].dropna().unique().tolist())
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Машина</div>', unsafe_allow_html=True)
+    selected_vehicles = st.multiselect("Машина", all_vehicles, default=all_vehicles, label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    all_drivers = sorted(df["driver_name"].dropna().unique().tolist())
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Водитель</div>', unsafe_allow_html=True)
+    selected_drivers = st.multiselect("Водитель", all_drivers, default=all_drivers, label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    all_viols = sorted(df["violation_description"].replace("", np.nan).dropna().unique().tolist())
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="filter-card-title">Тип нарушения</div>', unsafe_allow_html=True)
+    selected_viols = st.multiselect("Нарушение", all_viols, default=all_viols, label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.button("Сбросить все фильтры"):
+        st.rerun()
+
+    filtered_df = df.copy()
+
+    if len(date_range) == 2:
+        start_d, end_d = date_range
+        filtered_df = filtered_df[
+            (filtered_df["dt_date"].dt.date >= start_d) & 
+            (filtered_df["dt_date"].dt.date <= end_d)
+        ]
+
+    if only_with_debt:
+        filtered_df = filtered_df[filtered_df["debt_balance"] > 0]
         
     if only_violations:
-        mask &= daily_df["vehicle_name"].isin(vehicles_with_violations)
+        filtered_df = filtered_df[filtered_df["violation_description"] != ""]
 
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
+    filtered_df = filtered_df[
+        filtered_df["group"].isin(selected_groups) &
+        filtered_df["vehicle_country"].isin(selected_veh_countries) &
+        filtered_df["vehicle_name"].isin(selected_vehicles) &
+        filtered_df["driver_name"].isin(selected_drivers)
+    ]
 
-    if selected_vehicle_countries:
-        mask &= daily_df["vehicle_country"].isin(selected_vehicle_countries)
-    if selected_groups:
-        mask &= daily_df["group"].isin(selected_groups)
-    if selected_vehicles:
-        mask &= daily_df["vehicle_name"].isin(selected_vehicles)
-    if selected_drivers:
-        mask &= daily_df["driver_name"].isin(selected_drivers)
-    if selected_countries:
-        mask &= daily_df["rest_country_before_shift"].isin(selected_countries)
-    if selected_comments:
-        mask &= daily_df["violation_description"].isin(selected_comments)
 
-    mask &= (
-        daily_df["rest_before_shift_hours"].between(rest_min, rest_max)
-        | daily_df["rest_before_shift_hours"].isna()
+# ==============================================================================
+# БЛОК 5: ОТРИСОВКА СТРАНИЦ ПРИЛОЖЕНИЯ
+# ==============================================================================
+
+if page == "Main (Таблица)":
+    st.markdown('<div class="main-header">Мониторинг смен и соблюдения РТО</div>', unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Всего смен в отчете", len(filtered_df))
+    with col2:
+        st.metric("Активных машин", filtered_df["vehicle_name"].nunique())
+    with col3:
+        violations_count = len(filtered_df[filtered_df["violation_description"] != ""])
+        st.metric("Всего нарушений/меток", violations_count)
+    with col4:
+        max_debt = filtered_df["debt_balance"].max() if not filtered_df.empty else 0
+        st.metric("Макс. баланс долга (ч)", f"{max_debt:.2f}")
+
+    st.markdown("---")
+
+    display_table = filtered_df[[
+        "date", "weekday", "group", "vehicle_country", "vehicle_name", 
+        "driver_name", "rest_country_before_shift", "rest_before_shift_hours", 
+        "display_text", "violation_description", "pause_start", "pause_end", 
+        "debt_balance", "debt_days_counter"
+    ]].copy()
+
+    display_table.columns = [
+        "Дата", "День", "Группа", "Страна ТС", "Машина", 
+        "Водитель", "Страна отдыха", "Отдых (ч)", "Отображение", 
+        "Описание / Нарушение", "Начало паузы", "Конец паузы", 
+        "Долг (баланс)", "Дней долга"
+    ]
+
+    def style_dataframe_rows(row):
+        original_idx = row.name
+        if original_idx in filtered_df.index:
+            c_type = filtered_df.loc[original_idx, "status_color"]
+            return [get_cell_style(c_type)] * len(row)
+        return [''] * len(row)
+
+    styled_table = display_table.style.apply(style_dataframe_rows, axis=1)
+    st.dataframe(styled_table, use_container_width=True, height=500)
+
+    excel_bytes = convert_df_to_excel(filtered_df)
+    st.download_button(
+        label="📥 Скачать отфильтрованный отчет в Excel",
+        data=excel_bytes,
+        file_name="tacho_rt_monitoring_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    filtered = daily_df[mask].drop(columns=["dt_date"]).reset_index(drop=True)
-
-    def render_data_table(data_to_render, title_prefix="Мониторинг смен"):
-        filtered_display = data_to_render.copy()
-
-        display_df = filtered_display.drop(columns=["status_color"]).rename(
-            columns={
-                "date": "Дата",
-                "weekday": "День недели",
-                "group": "Группа",
-                "vehicle_country": "Страна авто",
-                "vehicle_name": "Машина",
-                "driver_name": "Водитель",
-                "rest_country_before_shift": "Страна отдыха ДО смены",
-                "rest_before_shift_hours": "_raw_hours",
-                "display_text": "Отдых ДО смены (ч)",
-                "violation_description": "Комментарий",
-                "pause_start": "Начало паузы",
-                "pause_end": "Конец паузы",
-                "debt_balance": "Компенсация",
-                "debt_days_counter": "Дней компенсации",
-            }
-        )
-
-        if not display_df.empty:
-            sub_dfs = []
-            for vehicle, group_df in display_df.groupby("Машина", sort=True):
-                sorted_sub = group_df.sort_values(by="Дата", ascending=True)
-                sub_dfs.append(sorted_sub)
-            display_df = pd.concat(sub_dfs, ignore_index=True)
-
-        def apply_table_styling(df, raw_df):
-            if df.empty:
-                return df.style
-
-            def style_specific_row_and_cell(row):
-                styles = ['' for _ in row]
-                idx = row.name
-                
-                c_type = raw_df.loc[idx, "status_color"] if idx in raw_df.index else ""
-                h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
-
-                cell_style = get_cell_style(c_type)
-                if not cell_style and pd.notna(h_val) and h_val >= 45.0:
-                    cell_style = get_cell_style("blue")
-
-                if 'Отдых ДО смены (ч)' in df.columns:
-                    col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
-                    styles[col_idx] = cell_style
-
-                row_blue_style = "background-color: #DBEAFE; color: #1E3A8A;" if (pd.notna(h_val) and h_val >= 24.0) else ""
-                if row_blue_style:
-                    for i, col_name in enumerate(df.columns):
-                        if col_name != 'Отдых ДО смены (ч)':
-                            styles[i] = row_blue_style
-
-                return styles
-
-            styler = df.style.apply(style_specific_row_and_cell, axis=1).format({
-                "Компенсация": "{:.2f}",
-                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
-            })
-            
-            def highlight_borders(df_sub):
-                css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
-                cars = df_sub['Машина'].values
-                for i in range(1, len(cars)):
-                    if cars[i] != cars[i-1]:
-                        css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
-                return css_styles
-
-            styler.apply(highlight_borders, axis=None)
-            return styler
-
-        render_df = display_df.drop(columns=["_raw_hours"])
-
-        col_h, col_b = st.columns([4, 1])
-        with col_h:
-            st.markdown(
-                f"<div class='main-header' style='margin-top: 15px;'>{title_prefix} (найдено:"
-                f" {len(render_df)})</div>",
-                unsafe_allow_html=True,
-            )
-        with col_b:
-            if not render_df.empty:
-                excel_file = convert_df_to_excel(render_df)
-                st.download_button(
-                    label="📥 Скачать Excel",
-                    data=excel_file,
-                    file_name="monitoring_smen.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-
-        if not render_df.empty:
-            styled_display = apply_table_styling(render_df.head(500), data_to_render)
-            st.dataframe(
-                styled_display,
-                use_container_width=True,
-                hide_index=True,
-                height=750,
-            )
-            if len(render_df) > 500:
-                st.caption(" Отображены первые 500 строк. Скачайте Excel для получения полного файла.")
-        else:
-            st.info("Данные не найдены.")
-
-    if nav_page == "Main":
-        render_data_table(filtered, "Мониторинг смен")
-
-    elif nav_page == "Calendar":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
-
-        if not filtered.empty:
-            pivot_df = filtered.copy()
-
-            def safe_max_hours(x):
-                valid = x.dropna()
-                return valid.max() if not valid.empty else np.nan
-
-            def safe_display_text(x):
-                sub = pivot_df.loc[x.index, "display_text"].dropna()
-                return " / ".join(sub) if not sub.empty else ""
-
-            def safe_status_color(x):
-                sub_hours = pivot_df.loc[x.index, "rest_before_shift_hours"]
-                valid_hours = sub_hours.dropna()
-                if valid_hours.empty:
-                    return ""
-                max_idx = valid_hours.idxmax()
-                return pivot_df.loc[max_idx, "status_color"] if max_idx in pivot_df.index else ""
-
-            grouped_matrix = (
-                pivot_df.groupby(["vehicle_name", "date"])
-                .agg({
-                    "rest_before_shift_hours": [safe_max_hours, safe_display_text],
-                    "status_color": safe_status_color
-                })
-            )
-            grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
-            grouped_matrix = grouped_matrix.reset_index()
-
-            text_matrix = grouped_matrix.pivot(
-                index="vehicle_name", columns="date", values="display_text"
-            ).fillna("")
-
-            hours_matrix = grouped_matrix.pivot(
-                index="vehicle_name", columns="date", values="max_hours"
-            )
-            
-            display_calendar = text_matrix.copy()
-            for col in hours_matrix.columns:
-                for idx in hours_matrix.index:
-                    h_val = hours_matrix.loc[idx, col]
-                    txt_val = text_matrix.loc[idx, col]
-                    if pd.notna(h_val):
-                        display_calendar.loc[idx, col] = txt_val if txt_val else f"{h_val:.2f}"
-                    else:
-                        display_calendar.loc[idx, col] = ""
-
-            latest_row_per_vehicle = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()
-            latest_debts_float = latest_row_per_vehicle["debt_balance"].astype(float)
-            latest_days_float = latest_row_per_vehicle["debt_days_counter"].astype(float)
-
-            display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
-            display_calendar["Дней компенсации"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
-
-            vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
-            display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
-
-            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Дней компенсации"]]
-            cols_order = ["Группа"] + middle_cols + ["Компенсация", "Дней компенсации"]
-            display_calendar = display_calendar[cols_order]
-
-            new_column_names = {}
-            for col in display_calendar.columns:
-                if col in ["Группа", "Компенсация", "Дней компенсации"]:
-                    new_column_names[col] = col
-                    continue
-                try:
-                    dt = pd.to_datetime(col)
-                    wd = dt.dayofweek
-                    wd_map = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
-                    suffix = f" [{wd_map[wd]}]"
-                    if wd in [5, 6]:
-                        suffix = f" 🔥{wd_map[wd]}"
-                    new_column_names[col] = f"{col}{suffix}"
-                except:
-                    pass
-            
-            display_calendar = display_calendar.rename(columns=new_column_names)
-            color_matrix = grouped_matrix.pivot(index="vehicle_name", columns="date", values="status_color").fillna("").rename(columns=new_column_names)
-
-            def style_calendar_cell(data):
-                df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
-                
-                for new_col in display_calendar.columns:
-                    if new_col in ["Группа", "Компенсация", "Дней компенсации"]:
-                        if new_col == "Компенсация":
-                            for idx in display_calendar.index:
-                                try:
-                                    val = float(latest_debts_float.get(idx, 0.0))
-                                except:
-                                    val = 0.0
-                                if val > 0:
-                                    df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
-                        elif new_col == "Дней компенсации":
-                            for idx in display_calendar.index:
-                                try:
-                                    d_val = int(latest_days_float.get(idx, 0))
-                                except:
-                                    d_val = 0
-                                if d_val > 0:
-                                    df_styles.loc[idx, new_col] = "font-weight: bold; color: #1E3A8A; background-color: #DBEAFE;"
-                        continue
-
-                    for idx in display_calendar.index:
-                        c_type = color_matrix.loc[idx, new_col] if new_col in color_matrix.columns and idx in display_calendar.index else ""
-                        orig_col_key = [k for k, v in new_column_names.items() if v == new_col]
-                        h_val = hours_matrix.loc[idx, orig_col_key[0]] if orig_col_key and idx in hours_matrix.index and orig_col_key[0] in hours_matrix.columns else np.nan
-                        
-                        bg_style = get_cell_style(c_type)
-                        if not bg_style and pd.notna(h_val) and h_val >= 45.0:
-                            bg_style = get_cell_style("blue")
-
-                        if bg_style:
-                            df_styles.loc[idx, new_col] = bg_style
-
-                return df_styles
-
-            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({
-                "Компенсация": "{:.2f}",
-                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
-            })
-            
-            st.dataframe(
-                styled_calendar,
-                use_container_width=True,
-                height=750,
-                column_config={
-                    "Группа": st.column_config.TextColumn("Группа", pinned=True),
-                }
-            )
-        else:
-            st.info("Нет данных для отображения матрицы.")
-
-    elif nav_page == "Compensation":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Компенсация машин</div>", unsafe_allow_html=True)
-
-        latest_df = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name", as_index=False).last()
+elif page == "Calendar (Матрица)":
+    st.markdown('<div class="main-header">Календарная матрица отдыха и баланса долгов ТС</div>', unsafe_allow_html=True)
+    
+    if filtered_df.empty:
+        st.warning("Нет данных для построения календарной матрицы по выбранным фильтрам.")
+    else:
+        filtered_df["date_str"] = filtered_df["dt_date"].dt.strftime("%Y-%m-%d")
         
-        comp_mask = pd.Series(True, index=latest_df.index)
-        if only_debt_vehicles:
-            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_debt)
-        if only_violations:
-            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_violations)
-        if selected_groups:
-            comp_mask &= latest_df["group"].isin(selected_groups)
-        if selected_vehicles:
-            comp_mask &= latest_df["vehicle_name"].isin(selected_vehicles)
-            
-        filtered_latest = latest_df[comp_mask]
+        pivot_display = filtered_df.pivot_table(
+            index="vehicle_name", 
+            columns="date_str", 
+            values="display_text", 
+            aggfunc="first"
+        ).fillna("")
 
-        comp_df = filtered_latest[["group", "vehicle_name", "debt_balance", "debt_days_counter"]].copy()
-        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Дней компенсации"]
-        comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
+        st.markdown("### Сводная таблица пауз по дням")
+        st.dataframe(pivot_display, use_container_width=True, height=450)
 
-        col_h, col_b = st.columns([4, 1])
-        with col_h:
-            st.markdown(f"<div style='font-size: 14px; font-weight: 600; margin-top: 10px;'>Найдено машин: {len(comp_df)}</div>", unsafe_allow_html=True)
-        with col_b:
-            if not comp_df.empty:
-                excel_file = convert_df_to_excel(comp_df)
-                st.download_button(
-                    label="📥 Скачать Excel",
-                    data=excel_file,
-                    file_name="compensation_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+elif page == "Compensation (Отчет)":
+    st.markdown('<div class="main-header">Отчет по текущим компенсациям и накопленным долгам</div>', unsafe_allow_html=True)
+    
+    if filtered_df.empty:
+        st.warning("Нет данных для формирования отчета по компенсациям.")
+    else:
+        comp_summary = filtered_df.groupby("vehicle_name").agg(
+            Последняя_дата=("dt_date", "max"),
+            Текущий_долг_часов=("debt_balance", "last"),
+            Дней_накопления=("debt_days_counter", "last"),
+            Последняя_группа=("group", "last"),
+            Последний_водитель=("driver_name", "last")
+        ).reset_index()
 
-        if not comp_df.empty:
-            st.dataframe(
-                comp_df.style.format({
-                    "Время компенсации": "{:.2f}",
-                    "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
-                }),
-                use_container_width=True,
-                hide_index=True,
-                height=750,
-            )
-        else:
-            st.info("Данные отсутствуют.")
-
-else:
-    st.markdown(
-        "<div class='main-header'>Мониторинг смен</div>", unsafe_allow_html=True
-    )
-    st.info("Загрузите CSV или Excel файл в панели слева.")
+        comp_summary = comp_summary.sort_values(by="Текущий_долг_часов", ascending=False)
+        st.dataframe(comp_summary, use_container_width=True, height=450)
