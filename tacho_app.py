@@ -203,13 +203,13 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Учитываем правило 4 недель (28 дней): старые долги вне влияния отсекаются
+            # Строгое правило 4 недель (28 дней): отсекаем долги старше 28 дней
             four_weeks_ago_limit = shift_dt - pd.Timedelta(days=28)
-            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt and d["created_at"] >= four_weeks_ago_limit]
+            active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
-            violation_desc = ""
+            violation_description = ""
             
             if pd.isna(h):
                 row["status_color"] = ""
@@ -228,103 +228,50 @@ def process_file_fast(file_bytes, file_name):
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
             is_weekend_end = end_weekday in [0, 6]
 
+            # 1. Сокращенная суточная пауза (9 - 11 ч)
             if 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
-                    violation_desc = "Сокращенная суточная пауза в воскресенье/понедельник"
+                    violation_description = "Сокращенная суточная пауза в воскресенье/понедельник"
                 else:
-                    w_start = row["week_start"]
-                    week_shifts_mask = (v_group["week_start"] == w_start) & (v_group.index < idx)
-                    short_weekday_count_prior = 0
-                    for _, p_row in v_group[week_shifts_mask].iterrows():
-                        ph = p_row["rest_before_shift_hours"]
-                        pe = p_row["pause_end"]
-                        pe_wd = pe.dayofweek if pd.notna(pe) else 0
-                        if pd.notna(ph) and 9.0 <= ph < 11.0 and pe_wd not in [0, 6]:
-                            short_weekday_count_prior += 1
-                    
-                    if short_weekday_count_prior >= 3:
-                        color_type = "red"
-                        violation_desc = "Превышен лимит сокращенных суточных пауз в неделю (4-я или более)"
-                    else:
-                        color_type = "yellow"
-                        violation_desc = "Сокращенная суточная пауза"
+                    color_type = "yellow"
+                    violation_description = "Сокращенная суточная пауза"
 
+            # 2. Пауза от 11 до 24 часов (компенсация 11+ посреди недели)
             elif 11.0 <= h < 24.0:
-                if is_weekend_end:
-                    color_type = "red"
-                    violation_desc = "Пауза < 24 часов в воскресенье/понедельник"
-                else:
-                    can_compensate_weekday = False
-                    if active_debts:
-                        oldest_debt = active_debts[0]
-                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
-                        if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
-                            can_compensate_weekday = True
-
-                    req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate_weekday) else 0)
-                    
-                    if active_debts and can_compensate_weekday and h >= req_h:
+                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
+                if is_midweek_end and active_debts:
+                    oldest_debt = active_debts[0]
+                    req_h = 11.0 + oldest_debt["debt_hours"]
+                    if h >= req_h:
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
-                        violation_desc = "Компенсация долга"
-                        active_debts.pop(0)  
-                    else:
-                        color_type = ""
-                        violation_desc = ""
+                        violation_description = "Компенсация долга"
+                        active_debts.pop(0)
 
+            # 3. Пауза от 24 до 45 часов (сокращенная еженедельная -> рождает долг на выходных)
             elif 24.0 <= h < 45.0:
                 is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
 
                 if is_midweek_end:
-                    can_compensate = False
-                    if active_debts:
-                        oldest_debt = active_debts[0]
-                        prev_weekend_start = row["week_start"] - pd.Timedelta(days=2)
-                        if oldest_debt.get("source_weekend_end") and oldest_debt["source_weekend_end"] >= prev_weekend_start:
-                            can_compensate = True
-
-                    req_h = 11.0 + (active_debts[0]["debt_hours"] if (active_debts and can_compensate) else 0)
-
-                    if active_debts and can_compensate and h >= req_h:
-                        extra_h = h - 11.0
-                        color_type = "green"
-                        display_str = f"11+{extra_h:.2f}"
-                        violation_desc = "Компенсация долга (пауза 24+ посреди недели)"
-                        active_debts.pop(0)
-                    else:
-                        color_type = ""
-                        violation_desc = "Пауза 24+ посреди недели (без долга)"
+                    # Посреди недели 24+ — обычная пауза без создания долга и без компенсаций
+                    color_type = ""
+                    violation_description = ""
                 else:
-                    four_weeks_ago = shift_dt - pd.Timedelta(days=28)
-                    recent_mask = (v_group["shift_start"] >= four_weeks_ago) & (v_group.index < idx)
-                    recent_short_count = 0
-                    for _, p_row in v_group[recent_mask].iterrows():
-                        ph = p_row["rest_before_shift_hours"]
-                        pe = p_row["pause_end"]
-                        pe_wd = pe.dayofweek if pd.notna(pe) else 0
-                        if pd.notna(ph) and 24.0 <= ph < 45.0 and pe_wd in [0, 6]:
-                            recent_short_count += 1
-
-                    if recent_short_count >= 2:
-                        color_type = "red"
-                        violation_desc = "Превышен лимит сокращенных еженедельных пауз за 4 недели (3-я или более)"
-                    else:
-                        color_type = "orange"
-                        violation_desc = "Сокращенная еженедельная пауза"
+                    color_type = "orange"
+                    violation_description = "Сокращенная еженедельная пауза"
 
                     debt_val = 45.0 - h
-                    expiry_dt = shift_dt + pd.Timedelta(days=21)
                     weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
                     
                     active_debts.append({
                         "debt_hours": debt_val, 
-                        "expiry_date": expiry_dt,
                         "source_weekend_end": weekend_end_ref,
                         "created_at": shift_dt
                     })
 
+            # 4. Полноценная пауза 45+ часов (компенсация на выходных)
             elif h >= 45.0:
                 if active_debts:
                     oldest_debt = active_debts[0]
@@ -333,16 +280,17 @@ def process_file_fast(file_bytes, file_name):
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
-                        violation_desc = "Компенсация долга"
+                        violation_description = "Компенсация долга"
                         active_debts.pop(0)  
                     else:
                         color_type = "blue"
-                        violation_desc = ""
+                        violation_description = ""
                 else:
                     color_type = "blue"
-                    violation_desc = ""
+                    violation_description = ""
 
-            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt and d["created_at"] >= four_weeks_ago_limit]
+            # Финальная проверка окна 4 недель для актуальных долгов
+            active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
 
             debt_bal = float(sum(d["debt_hours"] for d in active_debts))
             row["debt_balance"] = debt_bal
@@ -354,7 +302,7 @@ def process_file_fast(file_bytes, file_name):
 
             row["status_color"] = color_type
             row["display_text"] = display_str
-            row["violation_description"] = violation_desc
+            row["violation_description"] = violation_description
             processed_rows.append(row)
 
     res_df = pd.DataFrame(processed_rows)
@@ -432,7 +380,7 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Дефолтный диапазон: ровно 4 недели, заканчивающиеся неделей последней даты выгрузки
+    # Дефолтный диапазон: ровно 4 недели (текущая и 3 предыдущие)
     max_dt_pd = pd.to_datetime(max_date)
     max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
     default_start_dt = max_week_start - pd.Timedelta(weeks=3)
@@ -637,7 +585,7 @@ if uploaded_file:
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
                 "debt_balance": "Компенсация",
-                "debt_days_counter": "Возраст компенсации (дней)",
+                "debt_days_counter": "Дней компенсации",
             }
         )
 
@@ -677,7 +625,7 @@ if uploaded_file:
 
             styler = df.style.apply(style_specific_row_and_cell, axis=1).format({
                 "Компенсация": "{:.2f}",
-                "Возраст компенсации (дней)": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
             })
             
             def highlight_borders(df_sub):
@@ -782,18 +730,18 @@ if uploaded_file:
             latest_days_float = latest_row_per_vehicle["debt_days_counter"].astype(float)
 
             display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
-            display_calendar["Возраст компенсации (дней)"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
+            display_calendar["Дней компенсации"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
 
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
-            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Возраст компенсации (дней)"]]
-            cols_order = ["Группа"] + middle_cols + ["Компенсация", "Возраст компенсации (дней)"]
+            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Дней компенсации"]]
+            cols_order = ["Группа"] + middle_cols + ["Компенсация", "Дней компенсации"]
             display_calendar = display_calendar[cols_order]
 
             new_column_names = {}
             for col in display_calendar.columns:
-                if col in ["Группа", "Компенсация", "Возраст компенсации (дней)"]:
+                if col in ["Группа", "Компенсация", "Дней компенсации"]:
                     new_column_names[col] = col
                     continue
                 try:
@@ -814,7 +762,7 @@ if uploaded_file:
                 df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
                 
                 for new_col in display_calendar.columns:
-                    if new_col in ["Группа", "Компенсация", "Возраст компенсации (дней)"]:
+                    if new_col in ["Группа", "Компенсация", "Дней компенсации"]:
                         if new_col == "Компенсация":
                             for idx in display_calendar.index:
                                 try:
@@ -823,7 +771,7 @@ if uploaded_file:
                                     val = 0.0
                                 if val > 0:
                                     df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
-                        elif new_col == "Возраст компенсации (дней)":
+                        elif new_col == "Дней компенсации":
                             for idx in display_calendar.index:
                                 try:
                                     d_val = int(latest_days_float.get(idx, 0))
@@ -849,7 +797,7 @@ if uploaded_file:
 
             styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({
                 "Компенсация": "{:.2f}",
-                "Возраст компенсации (дней)": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
             })
             
             st.dataframe(
@@ -881,7 +829,7 @@ if uploaded_file:
         filtered_latest = latest_df[comp_mask]
 
         comp_df = filtered_latest[["group", "vehicle_name", "debt_balance", "debt_days_counter"]].copy()
-        comp_df.columns = ["Группа", "Машина", "Время компенсации (ч.)", "Возраст компенсации (дней)"]
+        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Дней компенсации"]
         comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
 
         col_h, col_b = st.columns([4, 1])
@@ -901,8 +849,8 @@ if uploaded_file:
         if not comp_df.empty:
             st.dataframe(
                 comp_df.style.format({
-                    "Время компенсации (ч.)": "{:.2f}",
-                    "Возраст компенсации (дней)": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                    "Время компенсации": "{:.2f}",
+                    "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
                 }),
                 use_container_width=True,
                 hide_index=True,
