@@ -7,28 +7,21 @@ import streamlit as st
 # БЛОК 1: ИНИЦИАЛИЗАЦИЯ И ГЛОБАЛЬНЫЕ СТИЛИ
 # ==============================================================================
 
-# Настраиваем конфигурацию страницы Streamlit: делаем макет широким (wide) 
-# и задаем заголовок вкладки в браузере.
 st.set_page_config(layout="wide", page_title="Мониторинг смен РТО")
 
-# Инъекция кастомных CSS-стилей для управления внешним видом элементов интерфейса
 st.markdown(
     """
 <style>
-    /* Основной фон всего приложения (светло-серый оттенок) */
     .stApp { background-color: #F1F5F9; }
     
-    /* Стилизация боковой панели (Sidebar): белый фон и правая граница */
     section[data-testid="stSidebar"] {
         background-color: #FFFFFF !important;
         border-right: 1px solid #CBD5E1 !important;
     }
-    /* Внутренние отступы контейнера сайдбара */
     section[data-testid="stSidebar"] .block-container {
         padding: 0.4rem !important;
     }
 
-    /* Визуальная карточка-контейнер для каждого фильтра в сайдбаре */
     .filter-card {
         border: 1px solid #CBD5E1;
         background-color: #F8FAFC;
@@ -36,7 +29,6 @@ st.markdown(
         padding: 4px 6px;
         margin-bottom: 5px;
     }
-    /* Заголовок внутри карточки фильтра */
     .filter-card-title {
         font-size: 11px;
         font-weight: 700;
@@ -44,7 +36,6 @@ st.markdown(
         margin-bottom: 2px;
     }
 
-    /* Оформление выбранных тегов (плашек) в мультиселектах */
     [data-baseweb="tag"] {
         background-color: #2563EB !important;
         border-radius: 3px !important;
@@ -59,7 +50,6 @@ st.markdown(
         font-size: 10px !important;
     }
 
-    /* Универсальные стили рамок, шрифтов и полей для инпутов */
     div[data-baseweb="select"] > div, 
     div[data-testid="stNumberInput"] input,
     div[data-testid="stDateInput"] input {
@@ -72,12 +62,10 @@ st.markdown(
         padding-bottom: 0px !important;
     }
 
-    /* Скрываем стандартные текстовые метки (label) над элементами в сайдбаре для компактности */
     div[data-testid="stSidebar"] label {
         display: none !important;
     }
     
-    /* Стилизация кнопок внутри боковой панели */
     div[data-testid="stSidebar"] button {
         background-color: #1E3A8A !important;
         color: white !important;
@@ -92,7 +80,6 @@ st.markdown(
         background-color: #1E40AF !important;
     }
     
-    /* Главный заголовок разделов интерфейса */
     .main-header {
         font-size: 18px;
         font-weight: 700;
@@ -106,10 +93,6 @@ st.markdown(
 
 
 def get_cell_style(color_type):
-    """
-    Функция возвращает CSS-стиль оформления ячейки таблицы 
-    в зависимости от типа зоны нарушения или статуса РТО.
-    """
     if color_type == "blue":
         return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"
     elif color_type == "yellow":
@@ -131,16 +114,11 @@ def get_cell_style(color_type):
 
 @st.cache_data(show_spinner="Обработка файла и проверка РТО...")
 def process_file_fast(file_bytes, file_name):
-    """
-    Основная функция загрузки, очистки и расчетов РТО. 
-    Принимает байты файла и возвращает обработанный DataFrame.
-    """
     if file_name.endswith(".csv"):
         df = pd.read_csv(io.BytesIO(file_bytes))
     else:
         df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
-    # Формируем штампы времени начала и конца активностей
     df["start_datetime"] = pd.to_datetime(
         df["start_date"].astype(str) + " " + df["start_time"].astype(str)
     )
@@ -163,7 +141,6 @@ def process_file_fast(file_bytes, file_name):
     act_type = df["activity_type"].astype(str).str.upper()
     dur_min = df["duration_minutes"].fillna(0)
 
-    # Определяем полноценный отдых (RESTING или CARDLESS от 9 часов / 540 минут)
     is_rest = act_type.isin(["RESTING", "CARDLESS"]) & (dur_min >= 540)
 
     change_group = (
@@ -224,17 +201,15 @@ def process_file_fast(file_bytes, file_name):
 
     processed_rows = []
     
-    # Цикл обработки по каждой машине (аккумулируем очередь долгов)
     for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
         v_group = v_group.reset_index(drop=True)
-        active_debts = []  # Очередь накопленных долгов
+        active_debts = []
         
         for idx, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            # Рулетка 4 недель (28 дней): удаляем долги старше 28 дней
             four_weeks_ago_limit = shift_dt - pd.Timedelta(days=28)
             active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
             
@@ -262,12 +237,9 @@ def process_file_fast(file_bytes, file_name):
 
             total_debt_hours = sum(d["debt_hours"] for d in active_debts)
 
-            # 1. Критическое нарушение: пауза меньше 9 часов
             if h < 9.0:
                 color_type = "critical"
                 violation_description = "Критическое нарушение: Слишком короткая суточная пауза (менее 9 часов)"
-
-            # 2. Сокращенная суточная пауза: от 9 до 11 часов
             elif 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -275,11 +247,8 @@ def process_file_fast(file_bytes, file_name):
                 else:
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
-
-            # 3. Пауза от 11 часов и более (Разделение по дням недели и пакетное погашение)
             elif h >= 11.0:
                 if is_midweek_end:
-                    # Вт, Ср, Чт, Пт, Сб: схема 11+ (возраст долгов ДО 7 дней включительно)
                     req_h = 11.0 + total_debt_hours
                     max_debt_age_11 = 7
                     all_debts_are_fresh = all(
@@ -292,17 +261,15 @@ def process_file_fast(file_bytes, file_name):
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
                         violation_description = "Компенсация всего пакета долгов (11+)"
-                        active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ СУММЫ РАЗОМ
+                        active_debts.clear()
                     else:
                         color_type = ""
                         violation_description = ""
-                
-                else:  # Это Вс или Пн
+                else:
                     if h < 24.0:
                         color_type = "red"
                         violation_description = "Нарушение: Пауза менее 24 часов на выходных"
                     elif 24.0 <= h < 45.0:
-                        # Сокращенная еженедельная на выходных — рождает новый долг
                         color_type = "orange"
                         debt_val = 45.0 - h  
                         violation_description = "Сокращенная еженедельная пауза (создан долг)"
@@ -313,8 +280,7 @@ def process_file_fast(file_bytes, file_name):
                             "source_weekend_end": weekend_end_ref,
                             "created_at": shift_dt
                         })
-                    else:  # h >= 45.0 на выходных
-                        # Вс, Пн: схема 45+ (возраст долгов ДО 28 дней)
+                    else:
                         req_h = 45.0 + total_debt_hours
                         max_debt_age_45 = 28
                         all_debts_are_valid = all(
@@ -327,7 +293,7 @@ def process_file_fast(file_bytes, file_name):
                             color_type = "green"
                             display_str = f"45+{extra_h:.2f}"
                             violation_description = "Полноценная компенсация всего пакета долгов (45+)"
-                            active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ СУММЫ РАЗОМ
+                            active_debts.clear()
                         else:
                             color_type = "blue"
                             violation_description = ""
@@ -365,7 +331,6 @@ def process_file_fast(file_bytes, file_name):
 # ==============================================================================
 
 def convert_df_to_excel(df):
-    """Конвертирует DataFrame в байтовый Excel-файл для скачивания."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='РТО_Мониторинг')
@@ -502,9 +467,9 @@ if page == "Main (Таблица)":
 
     display_table.columns = [
         "Дата", "День", "Группа", "Страна ТС", "Машина", 
-        "Водитель", "Страна отдыха", "Отдых (ч)", "Отображение", 
+        "Водитель", "Страна отдыха", "Отдых (ч)", "Время компенсации (ч.)", 
         "Описание / Нарушение", "Начало паузы", "Конец паузы", 
-        "Долг (баланс)", "Дней долга"
+        "Долг (баланс)", "Возраст долга (дней)"
     ]
 
     def style_dataframe_rows(row):
@@ -540,7 +505,7 @@ elif page == "Calendar (Матрица)":
             aggfunc="first"
         ).fillna("")
 
-        st.markdown("### Сводная таблица пауз по дням")
+        st.markdown("### Сводная таблица пауз по дням (Время компенсации / Отдых)")
         st.dataframe(pivot_display, use_container_width=True, height=450)
 
 elif page == "Compensation (Отчет)":
@@ -552,10 +517,16 @@ elif page == "Compensation (Отчет)":
         comp_summary = filtered_df.groupby("vehicle_name").agg(
             Последняя_дата=("dt_date", "max"),
             Текущий_долг_часов=("debt_balance", "last"),
-            Дней_накопления=("debt_days_counter", "last"),
+            Возраст_долга_дней=("debt_days_counter", "last"),
             Последняя_группа=("group", "last"),
             Последний_водитель=("driver_name", "last")
         ).reset_index()
 
         comp_summary = comp_summary.sort_values(by="Текущий_долг_часов", ascending=False)
+        
+        comp_summary.columns = [
+            "Машина", "Последняя дата", "Текущий долг (ч)", 
+            "Возраст долга (дней)", "Последняя группа", "Последний водитель"
+        ]
+        
         st.dataframe(comp_summary, use_container_width=True, height=450)
