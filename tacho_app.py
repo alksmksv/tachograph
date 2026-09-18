@@ -222,7 +222,13 @@ def process_file_fast(file_bytes, file_name):
                 row["status_color"] = ""
                 row["display_text"] = ""
                 row["violation_description"] = ""
-                row["debt_balance"] = float(sum(d["debt_hours"] for d in active_debts))
+                debt_bal = float(sum(d["debt_hours"] for d in active_debts))
+                row["debt_balance"] = debt_bal
+                if active_debts and debt_bal > 0:
+                    oldest_debt = active_debts[0]
+                    row["debt_days_counter"] = (shift_dt.normalize() - oldest_debt["created_at"].normalize()).days + 1
+                else:
+                    row["debt_days_counter"] = 0
                 processed_rows.append(row)
                 continue
 
@@ -322,7 +328,8 @@ def process_file_fast(file_bytes, file_name):
                     active_debts.append({
                         "debt_hours": debt_val, 
                         "expiry_date": expiry_dt,
-                        "source_weekend_end": weekend_end_ref
+                        "source_weekend_end": weekend_end_ref,
+                        "created_at": shift_dt
                     })
 
             elif h >= 45.0:
@@ -344,7 +351,13 @@ def process_file_fast(file_bytes, file_name):
 
             active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
 
-            row["debt_balance"] = float(sum(d["debt_hours"] for d in active_debts))
+            debt_bal = float(sum(d["debt_hours"] for d in active_debts))
+            row["debt_balance"] = debt_bal
+            if active_debts and debt_bal > 0:
+                oldest_debt = active_debts[0]
+                row["debt_days_counter"] = (shift_dt.normalize() - oldest_debt["created_at"].normalize()).days + 1
+            else:
+                row["debt_days_counter"] = 0
 
             row["status_color"] = color_type
             row["display_text"] = display_str
@@ -372,6 +385,7 @@ def process_file_fast(file_bytes, file_name):
         "pause_start",
         "pause_end",
         "debt_balance",
+        "debt_days_counter",
     ]
     return res_df[cols]
 
@@ -425,10 +439,10 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Вычисление диапазона по умолчанию: последний день выгрузки + 4 полных недели до текущей недели
+    # Дефолтный диапазон: 4 полные недели, заканчивающиеся неделей последней даты выгрузки
     max_dt_pd = pd.to_datetime(max_date)
     max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
-    default_start_dt = max_week_start - pd.Timedelta(weeks=4)
+    default_start_dt = max_week_start - pd.Timedelta(weeks=3) # 4 недели (текущая + 3 назад)
     default_start_date = max(min_date, default_start_dt.date())
     default_end_date = max_date
 
@@ -576,7 +590,7 @@ if uploaded_file:
 
     nav_page = st.radio(
         "Навигация",
-        options=["Main", "Calendar", "Compensation", "Violations"],
+        options=["Main", "Calendar", "Compensation"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -630,6 +644,7 @@ if uploaded_file:
                 "pause_start": "Начало паузы",
                 "pause_end": "Конец паузы",
                 "debt_balance": "Компенсация",
+                "debt_days_counter": "Дней компенсации",
             }
         )
 
@@ -667,7 +682,10 @@ if uploaded_file:
 
                 return styles
 
-            styler = df.style.apply(style_specific_row_and_cell, axis=1).format({"Компенсация": "{:.2f}"})
+            styler = df.style.apply(style_specific_row_and_cell, axis=1).format({
+                "Компенсация": "{:.2f}",
+                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+            })
             
             def highlight_borders(df_sub):
                 css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
@@ -755,15 +773,6 @@ if uploaded_file:
             hours_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="max_hours"
             )
-
-            debt_grouped = (
-                daily_df.groupby(["vehicle_name", "date"])["debt_balance"]
-                .last()
-                .reset_index()
-            )
-            calendar_debt_matrix = debt_grouped.pivot(
-                index="vehicle_name", columns="date", values="debt_balance"
-            ).fillna(0.0)
             
             display_calendar = text_matrix.copy()
             for col in hours_matrix.columns:
@@ -775,19 +784,24 @@ if uploaded_file:
                     else:
                         display_calendar.loc[idx, col] = ""
 
-            latest_debts_float = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
+            latest_row_per_vehicle = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()
+            latest_debts_float = latest_row_per_vehicle["debt_balance"].astype(float)
+            latest_days_float = latest_row_per_vehicle["debt_days_counter"].astype(float)
+
             display_calendar["Компенсация"] = display_calendar.index.map(latest_debts_float).fillna(0.0).astype(float)
+            display_calendar["Дней компенсации"] = display_calendar.index.map(latest_days_float).fillna(0.0).astype(int)
 
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
-            # Переносим столбец "Компенсация" в самый конец (правая часть), чтобы он был справа при скролле
-            cols_order = [c for c in display_calendar.columns if c != "Компенсация"] + ["Компенсация"]
+            # Колонки в нужном порядке: Группа, Дни календаря, Компенсация, Дней компенсации (последний столбец)
+            middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Дней компенсации"]]
+            cols_order = ["Группа"] + middle_cols + ["Компенсация", "Дней компенсации"]
             display_calendar = display_calendar[cols_order]
 
             new_column_names = {}
             for col in display_calendar.columns:
-                if col in ["Группа", "Компенсация"]:
+                if col in ["Группа", "Компенсация", "Дней компенсации"]:
                     new_column_names[col] = col
                     continue
                 try:
@@ -808,7 +822,7 @@ if uploaded_file:
                 df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
                 
                 for new_col in display_calendar.columns:
-                    if new_col in ["Группа", "Компенсация"]:
+                    if new_col in ["Группа", "Компенсация", "Дней компенсации"]:
                         if new_col == "Компенсация":
                             for idx in display_calendar.index:
                                 try:
@@ -817,6 +831,14 @@ if uploaded_file:
                                     val = 0.0
                                 if val > 0:
                                     df_styles.loc[idx, new_col] = "font-weight: bold; color: #9A3412; background-color: #FFEDD5;"
+                        elif new_col == "Дней компенсации":
+                            for idx in display_calendar.index:
+                                try:
+                                    d_val = int(latest_days_float.get(idx, 0))
+                                except:
+                                    d_val = 0
+                                if d_val > 0:
+                                    df_styles.loc[idx, new_col] = "font-weight: bold; color: #1E3A8A; background-color: #DBEAFE;"
                         continue
 
                     for idx in display_calendar.index:
@@ -833,9 +855,11 @@ if uploaded_file:
 
                 return df_styles
 
-            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({"Компенсация": "{:.2f}"})
+            styled_calendar = display_calendar.style.apply(style_calendar_cell, axis=None).format({
+                "Компенсация": "{:.2f}",
+                "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+            })
             
-            # Закрепляем столбец Группа слева
             st.dataframe(
                 styled_calendar,
                 use_container_width=True,
@@ -864,8 +888,8 @@ if uploaded_file:
             
         filtered_latest = latest_df[comp_mask]
 
-        comp_df = filtered_latest[["group", "vehicle_name", "debt_balance"]].copy()
-        comp_df.columns = ["Группа", "Машина", "Время компенсации"]
+        comp_df = filtered_latest[["group", "vehicle_name", "debt_balance", "debt_days_counter"]].copy()
+        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Дней компенсации"]
         comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
 
         col_h, col_b = st.columns([4, 1])
@@ -884,105 +908,16 @@ if uploaded_file:
 
         if not comp_df.empty:
             st.dataframe(
-                comp_df.style.format({"Время компенсации": "{:.2f}"}),
+                comp_df.style.format({
+                    "Время компенсации": "{:.2f}",
+                    "Дней компенсации": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
+                }),
                 use_container_width=True,
                 hide_index=True,
                 height=750,
             )
         else:
             st.info("Данные отсутствуют.")
-
-    elif nav_page == "Violations":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Нарушения (красные статусы)</div>", unsafe_allow_html=True)
-
-        viol_df = filtered[filtered["status_color"] == "red"].copy()
-        
-        # Переименуем колонки под интерфейс главной страницы, исключив столбец Компенсация
-        display_viol = viol_df.drop(columns=["status_color", "debt_balance"]).rename(
-            columns={
-                "date": "Дата",
-                "weekday": "День недели",
-                "group": "Группа",
-                "vehicle_country": "Страна авто",
-                "vehicle_name": "Машина",
-                "driver_name": "Водитель",
-                "rest_country_before_shift": "Страна отдыха ДО смены",
-                "rest_before_shift_hours": "_raw_hours",
-                "display_text": "Отдых ДО смены (ч)",
-                "violation_description": "Комментарий",
-                "pause_start": "Начало паузы",
-                "pause_end": "Конец паузы",
-            }
-        )
-
-        if not display_viol.empty:
-            sub_dfs = []
-            for vehicle, group_df in display_viol.groupby("Машина", sort=True):
-                sorted_sub = group_df.sort_values(by="Дата", ascending=True)
-                sub_dfs.append(sorted_sub)
-            display_viol = pd.concat(sub_dfs, ignore_index=True)
-
-        def apply_viol_styling(df, raw_df):
-            if df.empty:
-                return df.style
-
-            def style_row(row):
-                styles = ['' for _ in row]
-                idx = row.name
-                c_type = "red"
-                h_val = raw_df.loc[idx, "rest_before_shift_hours"] if idx in raw_df.index else np.nan
-
-                cell_style = get_cell_style(c_type)
-                if 'Отдых ДО смены (ч)' in df.columns:
-                    col_idx = df.columns.get_loc('Отдых ДО смены (ч)')
-                    styles[col_idx] = cell_style
-
-                row_blue_style = "background-color: #DBEAFE; color: #1E3A8A;" if (pd.notna(h_val) and h_val >= 24.0) else ""
-                if row_blue_style:
-                    for i, col_name in enumerate(df.columns):
-                        if col_name != 'Отдых ДО смены (ч)':
-                            styles[i] = row_blue_style
-                return styles
-
-            styler = df.style.apply(style_row, axis=1)
-            
-            def highlight_borders(df_sub):
-                css_styles = pd.DataFrame('', index=df_sub.index, columns=df_sub.columns)
-                cars = df_sub['Машина'].values
-                for i in range(1, len(cars)):
-                    if cars[i] != cars[i-1]:
-                        css_styles.iloc[i, :] = 'border-top: 3px solid #0F172A !important;'
-                return css_styles
-
-            styler.apply(highlight_borders, axis=None)
-            return styler
-
-        render_viol_df = display_viol.drop(columns=["_raw_hours"])
-
-        col_h, col_b = st.columns([4, 1])
-        with col_h:
-            st.markdown(f"<div style='font-size: 14px; font-weight: 600; margin-top: 10px;'>Найдено нарушений: {len(render_viol_df)}</div>", unsafe_allow_html=True)
-        with col_b:
-            if not render_viol_df.empty:
-                excel_file = convert_df_to_excel(render_viol_df)
-                st.download_button(
-                    label="📥 Скачать Excel",
-                    data=excel_file,
-                    file_name="violations_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-
-        if not render_viol_df.empty:
-            styled_viol = apply_viol_styling(render_viol_df, viol_df.reset_index(drop=True))
-            st.dataframe(
-                styled_viol,
-                use_container_width=True,
-                hide_index=True,
-                height=750,
-            )
-        else:
-            st.info("Нарушений не зафиксировано.")
 
 else:
     st.markdown(
