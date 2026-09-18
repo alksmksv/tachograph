@@ -136,7 +136,7 @@ def process_file_fast(file_bytes, file_name):
     act_type = df["activity_type"].astype(str).str.upper()
     dur_min = df["duration_minutes"].fillna(0)
 
-    is_rest = act_type.isin(["RESTING", "CARDLESS"]) & (dur_min >= 540)
+    is_rest = act_type.isin(["RESTING"]) & (dur_min >= 540)
 
     change_group = (
         (df["vehicle_name"] != df["vehicle_name"].shift())
