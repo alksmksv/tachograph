@@ -228,14 +228,14 @@ def process_file_fast(file_bytes, file_name):
                 continue
 
             end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6]
+            is_weekend_end = end_weekday in [0, 6] # Воскресенье (6) или Понедельник (0)
 
             total_debt_hours = sum(d["debt_hours"] for d in active_debts)
 
             # 1. Критическое нарушение (< 9 часов)
             if h < 9.0:
                 color_type = "critical"
-                violation_description = f"Критическое нарушение: Слишком короткая суточная пауза ({h:.2f} ч < 9.0 ч)"
+                violation_description = "Критическое нарушение: Слишком короткая суточная пауза"
 
             # 2. Сокращенная суточная пауза (9 - 11 ч)
             elif 9.0 <= h < 11.0:
@@ -246,19 +246,30 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
 
-            # 3. Пауза от 11 до 24 часов (Пакетный зачет 11+ посреди недели)
+            # 3. Пауза от 11 до 24 часов (Пакетный зачет 11+ посреди недели ИЛИ нарушение на выходных)
             elif 11.0 <= h < 24.0:
-                is_midweek_end = end_weekday in [1, 2, 3, 4, 5]
-                req_h = 11.0 + total_debt_hours
-                if is_midweek_end and active_debts and h >= req_h:
-                    extra_h = h - 11.0
-                    color_type = "green"
-                    display_str = f"11+{extra_h:.2f}"
-                    violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
-                    active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
+                is_midweek_end = end_weekday in [1, 2, 3, 4, 5] # Вт, Ср, Чт, Пт, Сб
+                
+                if is_weekend_end:
+                    color_type = "red"
+                    violation_description = "Нарушение: Пауза менее 24 часов на выходных"
                 else:
-                    color_type = ""
-                    violation_description = ""
+                    # Проверяем возраст долгов для схемы 11+ (не старше 7 дней)
+                    max_debt_age_days = 0
+                    if active_debts:
+                        oldest_dt = min(d["created_at"] for d in active_debts)
+                        max_debt_age_days = (shift_dt.normalize() - oldest_dt.normalize()).days
+
+                    req_h = 11.0 + total_debt_hours
+                    if active_debts and h >= req_h and max_debt_age_days <= 7:
+                        extra_h = h - 11.0
+                        color_type = "green"
+                        display_str = f"11+{extra_h:.2f}"
+                        violation_description = f"Компенсация всего пакета долгов ({total_debt_hours:.2f} ч)"
+                        active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
+                    else:
+                        color_type = ""
+                        violation_description = ""
 
             # 4. Пауза от 24 до 45 часов (Сокращенная еженедельная -> рождает долг)
             elif 24.0 <= h < 45.0:
@@ -270,7 +281,7 @@ def process_file_fast(file_bytes, file_name):
                 else:
                     color_type = "orange"
                     debt_val = 45.0 - h
-                    violation_description = f"Сокращенная еженедельная пауза. Создан долг: {debt_val:.2f} ч"
+                    violation_description = "Сокращенная еженедельная пауза. Создан долг"
                     weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
                     
                     active_debts.append({
@@ -279,10 +290,10 @@ def process_file_fast(file_bytes, file_name):
                         "created_at": shift_dt
                     })
 
-            # 5. Полноценная пауза 45+ часов (Пакетный зачет на выходных)
+            # 5. Полноценная пауза 45+ часов (Пакетный зачет в Вс/Пн)
             elif h >= 45.0:
                 req_h = 45.0 + total_debt_hours
-                if active_debts and h >= req_h:
+                if is_weekend_end and active_debts and h >= req_h:
                     extra_h = h - 45.0
                     color_type = "green"
                     display_str = f"45+{extra_h:.2f}"
