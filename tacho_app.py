@@ -91,9 +91,6 @@ st.markdown(
 )
 
 
-# ==============================================================================
-# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЦВЕТОКОДИНГА
-# ==============================================================================
 def get_cell_style(color_type):
     if color_type == "blue":
         return "background-color: #DBEAFE; font-weight: bold; color: #1E3A8A;"
@@ -108,9 +105,6 @@ def get_cell_style(color_type):
     return ""
 
 
-# ==============================================================================
-# ОБРАБОТКА ДАННЫХ И РТО-ЛОГИКА
-# ==============================================================================
 @st.cache_data(show_spinner="Обработка файла и проверка РТО...")
 def process_file_fast(file_bytes, file_name):
     if file_name.endswith(".csv"):
@@ -179,10 +173,7 @@ def process_file_fast(file_bytes, file_name):
     agg_df["dt_date"] = agg_df["shift_start"].dt.date
     agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
 
-    days_ru = {
-        0: "ПН", 1: "ВТ", 2: "СР", 
-        3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"
-    }
+    days_ru = {0: "ПН", 1: "ВТ", 2: "СР", 3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"}
     agg_df["weekday"] = agg_df["shift_start"].dt.dayofweek.map(days_ru)
 
     extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
@@ -212,7 +203,9 @@ def process_file_fast(file_bytes, file_name):
             p_end = row["pause_end"]
             shift_dt = row["shift_start"]
             
-            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
+            # Учитываем правило 4 недель (28 дней): старые долги вне влияния отсекаются
+            four_weeks_ago_limit = shift_dt - pd.Timedelta(days=28)
+            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt and d["created_at"] >= four_weeks_ago_limit]
             
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
@@ -349,7 +342,7 @@ def process_file_fast(file_bytes, file_name):
                     color_type = "blue"
                     violation_desc = ""
 
-            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt]
+            active_debts = [d for d in active_debts if d["expiry_date"] >= shift_dt and d["created_at"] >= four_weeks_ago_limit]
 
             debt_bal = float(sum(d["debt_hours"] for d in active_debts))
             row["debt_balance"] = debt_bal
@@ -439,10 +432,10 @@ if uploaded_file:
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
 
-    # Дефолтный диапазон: 4 полные недели, заканчивающиеся неделей последней даты выгрузки
+    # Дефолтный диапазон: ровно 4 недели, заканчивающиеся неделей последней даты выгрузки
     max_dt_pd = pd.to_datetime(max_date)
     max_week_start = max_dt_pd - pd.Timedelta(days=max_dt_pd.dayofweek)
-    default_start_dt = max_week_start - pd.Timedelta(weeks=3) # 4 недели (текущая + 3 назад)
+    default_start_dt = max_week_start - pd.Timedelta(weeks=3)
     default_start_date = max(min_date, default_start_dt.date())
     default_end_date = max_date
 
@@ -794,7 +787,6 @@ if uploaded_file:
             vehicle_to_group = daily_df.drop_duplicates("vehicle_name").set_index("vehicle_name")["group"]
             display_calendar.insert(0, "Группа", display_calendar.index.map(vehicle_to_group).fillna("Н/Д"))
 
-            # Колонки в нужном порядке: Группа, Дни календаря, Компенсация, Дней компенсации (последний столбец)
             middle_cols = [c for c in display_calendar.columns if c not in ["Группа", "Компенсация", "Дней компенсации"]]
             cols_order = ["Группа"] + middle_cols + ["Компенсация", "Дней компенсации"]
             display_calendar = display_calendar[cols_order]
