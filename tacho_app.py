@@ -109,46 +109,149 @@ def get_cell_style(color_type):
 
 @st.cache_data(show_spinner="Обработка файла и проверка РТО...")
 def process_file_fast(file_bytes, file_name):
-    if file_name.endswith(".csv"):
+    if file_name.lower().endswith(".csv"):
         df = pd.read_csv(io.BytesIO(file_bytes))
     else:
         df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
+    required = {
+        "start_date", "start_time", "end_date", "end_time",
+        "vehicle_name", "driver_name", "activity_type", "duration_minutes",
+    }
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError("В файле отсутствуют обязательные колонки: " + ", ".join(missing))
+
     df["start_datetime"] = pd.to_datetime(
-        df["start_date"].astype(str) + " " + df["start_time"].astype(str)
+        df["start_date"].astype(str) + " " + df["start_time"].astype(str),
+        errors="coerce",
     )
     df["end_datetime"] = pd.to_datetime(
-        df["end_date"].astype(str) + " " + df["end_time"].astype(str)
+        df["end_date"].astype(str) + " " + df["end_time"].astype(str),
+        errors="coerce",
     )
+    df = df.dropna(subset=["start_datetime", "end_datetime"]).copy()
+    df = df[df["end_datetime"] > df["start_datetime"]].copy()
 
     if "group" not in df.columns:
         df["group"] = "Н/Д"
-
+    df["group"] = df["group"].fillna("Н/Д").astype(str)
     if "country" not in df.columns:
         df["country"] = "N/A"
-    else:
-        df["country"] = df["country"].fillna("N/A").astype(str).str.upper().str.strip()
+    df["country"] = df["country"].fillna("N/A").astype(str).str.upper().str.strip()
+    df["activity_type"] = df["activity_type"].fillna("").astype(str).str.upper().str.strip()
 
-    df = df.sort_values(
-        ["vehicle_name", "driver_name", "group", "start_datetime"]
-    ).reset_index(drop=True)
+    group_cols = ["vehicle_name", "driver_name", "group"]
+
+    def merge_intervals(intervals):
+        merged = []
+        for start_dt, end_dt in sorted(intervals, key=lambda x: x[0]):
+            if not merged or start_dt > merged[-1][1]:
+                merged.append([start_dt, end_dt])
+            else:
+                merged[-1][1] = max(merged[-1][1], end_dt)
+        return [(x[0], x[1]) for x in merged]
+
+    # CARDLESS: весь период считаем отдыхом. Параллельную не-REST активность удаляем.
+    normalized_groups = []
+    for _, part in df.groupby(group_cols, dropna=False, sort=False):
+        part = part.copy()
+        cardless = part[part["activity_type"] == "CARDLESS"]
+        cardless_intervals = merge_intervals(
+            list(zip(cardless["start_datetime"], cardless["end_datetime"]))
+        )
+
+        if cardless_intervals:
+            overlap_cardless = pd.Series(False, index=part.index)
+            for c_start, c_end in cardless_intervals:
+                overlap_cardless |= (
+                    (part["start_datetime"] < c_end)
+                    & (part["end_datetime"] > c_start)
+                )
+            keep = ~(
+                overlap_cardless
+                & ~part["activity_type"].eq("RESTING")
+            )
+            part = part[keep].copy()
+
+            base = cardless.iloc[0].copy()
+            additions = []
+            for c_start, c_end in cardless_intervals:
+                row = base.copy()
+                row["activity_type"] = "RESTING"
+                row["start_datetime"] = c_start
+                row["end_datetime"] = c_end
+                row["duration_minutes"] = (c_end - c_start).total_seconds() / 60.0
+                row["start_date"] = c_start.date()
+                row["start_time"] = c_start.time()
+                row["end_date"] = c_end.date()
+                row["end_time"] = c_end.time()
+                additions.append(row)
+            if additions:
+                part = pd.concat([part, pd.DataFrame(additions)], ignore_index=True)
+
+        # Объединяем пересекающиеся RESTING/CARDLESS-интервалы, чтобы не удваивать отдых.
+        rest_rows = part[part["activity_type"] == "RESTING"].copy()
+        non_rest_rows = part[part["activity_type"] != "RESTING"].copy()
+        if not rest_rows.empty:
+            rest_rows = rest_rows.sort_values(["start_datetime", "end_datetime"])
+            merged_rest = []
+            current_rows = []
+            current_start = None
+            current_end = None
+            for _, r in rest_rows.iterrows():
+                if current_start is None or r["start_datetime"] > current_end:
+                    if current_rows:
+                        template = current_rows[-1].copy()
+                        template["start_datetime"] = current_start
+                        template["end_datetime"] = current_end
+                        template["duration_minutes"] = (current_end - current_start).total_seconds() / 60.0
+                        template["start_date"] = current_start.date()
+                        template["start_time"] = current_start.time()
+                        template["end_date"] = current_end.date()
+                        template["end_time"] = current_end.time()
+                        merged_rest.append(template)
+                    current_rows = [r]
+                    current_start = r["start_datetime"]
+                    current_end = r["end_datetime"]
+                else:
+                    current_rows.append(r)
+                    current_end = max(current_end, r["end_datetime"])
+            if current_rows:
+                template = current_rows[-1].copy()
+                template["start_datetime"] = current_start
+                template["end_datetime"] = current_end
+                template["duration_minutes"] = (current_end - current_start).total_seconds() / 60.0
+                template["start_date"] = current_start.date()
+                template["start_time"] = current_start.time()
+                template["end_date"] = current_end.date()
+                template["end_time"] = current_end.time()
+                merged_rest.append(template)
+            part = pd.concat([non_rest_rows, pd.DataFrame(merged_rest)], ignore_index=True)
+
+        normalized_groups.append(part)
+
+    if not normalized_groups:
+        return pd.DataFrame()
+    df = pd.concat(normalized_groups, ignore_index=True)
+    df["duration_minutes"] = (
+        (df["end_datetime"] - df["start_datetime"]).dt.total_seconds() / 60.0
+    )
+    df = df.sort_values(group_cols + ["start_datetime", "end_datetime"]).reset_index(drop=True)
 
     act_type = df["activity_type"].astype(str).str.upper()
-    dur_min = df["duration_minutes"].fillna(0)
-
-    is_rest = act_type.isin(["RESTING"]) & (dur_min >= 540)
-
+    dur_min = pd.to_numeric(df["duration_minutes"], errors="coerce").fillna(0)
+    is_rest = act_type.eq("RESTING") & (dur_min >= 540)
     change_group = (
         (df["vehicle_name"] != df["vehicle_name"].shift())
         | (df["driver_name"] != df["driver_name"].shift())
         | (df["group"] != df["group"].shift())
     )
     df["shift_id"] = (is_rest | change_group).cumsum()
-
-    df["rest_hours"] = np.where(is_rest, (dur_min / 60), np.nan)
+    df["rest_hours"] = np.where(is_rest, dur_min / 60.0, np.nan)
     df["rest_country"] = np.where(is_rest, df["country"], np.nan)
-    df["pause_start_dt"] = np.where(is_rest, df["start_datetime"], pd.NaT)
-    df["pause_end_dt"] = np.where(is_rest, df["end_datetime"], pd.NaT)
+    df["pause_start_dt"] = pd.to_datetime(np.where(is_rest, df["start_datetime"], pd.NaT))
+    df["pause_end_dt"] = pd.to_datetime(np.where(is_rest, df["end_datetime"], pd.NaT))
 
     rest_subset = df[is_rest].copy()
     if not rest_subset.empty:
@@ -168,21 +271,7 @@ def process_file_fast(file_bytes, file_name):
 
     agg_df = work_df.groupby(
         ["shift_id", "vehicle_name", "driver_name", "group"], as_index=False
-    ).agg(
-        shift_start=("start_datetime", "min"),
-    )
-
-    agg_df["dt_date"] = agg_df["shift_start"].dt.date
-    agg_df["date"] = agg_df["shift_start"].dt.strftime("%Y-%m-%d")
-
-    days_ru = {0: "ПН", 1: "ВТ", 2: "СР", 3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"}
-    agg_df["weekday"] = agg_df["shift_start"].dt.dayofweek.map(days_ru)
-
-    extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
-    agg_df["vehicle_country"] = np.where(
-        extracted_code.isin(["CZ", "SK"]), extracted_code, "Other"
-    )
-
+    ).agg(shift_start=("start_datetime", "min"))
     agg_df["rest_before_shift_hours"] = agg_df["shift_id"].map(rest_before_hours)
     agg_df["rest_country_before_shift"] = (
         agg_df["shift_id"].map(rest_before_country).fillna("N/A")
@@ -190,56 +279,149 @@ def process_file_fast(file_bytes, file_name):
     agg_df["pause_start"] = agg_df["shift_id"].map(pause_start_before)
     agg_df["pause_end"] = agg_df["shift_id"].map(pause_end_before)
 
-    agg_df["week_start"] = agg_df["shift_start"].apply(
+    # Дата строки/паузы определяется по окончанию паузы; при отсутствии паузы — по смене.
+    agg_df["control_dt"] = agg_df["pause_end"].fillna(agg_df["shift_start"])
+    agg_df["dt_date"] = agg_df["control_dt"].dt.date
+    agg_df["date"] = agg_df["control_dt"].dt.strftime("%Y-%m-%d")
+    days_ru = {0: "ПН", 1: "ВТ", 2: "СР", 3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"}
+    agg_df["weekday"] = agg_df["control_dt"].dt.dayofweek.map(days_ru)
+    extracted_code = agg_df["vehicle_name"].astype(str).str[1:3].str.upper()
+    agg_df["vehicle_country"] = np.where(
+        extracted_code.isin(["CZ", "SK"]), extracted_code, "Other"
+    )
+    agg_df["week_start"] = agg_df["control_dt"].apply(
         lambda x: (x - pd.Timedelta(days=x.dayofweek)).normalize()
     )
 
+    def weekend_pair_id(pause_end):
+        """Идентификатор пары ВС-ПН: дата воскресенья этой пары."""
+        d = pd.Timestamp(pause_end).normalize()
+        if d.dayofweek == 6:  # воскресенье
+            return d
+        if d.dayofweek == 0:  # понедельник
+            return d - pd.Timedelta(days=1)
+        return pd.NaT
+
+    def build_period_comment(as_of, daily_week_counts, weekly_events_raw):
+        as_of = pd.Timestamp(as_of)
+        limit = as_of - pd.Timedelta(days=28)
+        comments = []
+
+        affected_weeks = sorted(
+            w for w, cnt in daily_week_counts.items()
+            if cnt >= 4 and w >= limit.normalize()
+        )
+        for week_start in affected_weeks:
+            week_end = week_start + pd.Timedelta(days=6)
+            comments.append(
+                "4 сокращенных паузы в неделю с "
+                f"{week_start.strftime('%d.%m.%Y')} по {week_end.strftime('%d.%m.%Y')}"
+            )
+
+        raw_window = [
+            e for e in weekly_events_raw
+            if limit <= e["pause_end"] <= as_of
+        ]
+
+        # Последние четыре пары выходных относительно текущей даты.
+        latest_sunday = as_of.normalize() - pd.Timedelta(days=(as_of.dayofweek - 6) % 7)
+        last_four_pairs = {
+            latest_sunday - pd.Timedelta(weeks=i) for i in range(4)
+        }
+        pair_events = {}
+        for event in raw_window:
+            pair_id = event["pair_id"]
+            if pd.notna(pair_id) and pair_id in last_four_pairs:
+                pair_events.setdefault(pair_id, []).append(event)
+
+        pair_ids = sorted(pair_events)
+        pair_representatives = []
+        for pair_id in pair_ids:
+            events = sorted(pair_events[pair_id], key=lambda e: e["pause_end"])
+            # Одна пара считается один раз. Для статуса берём событие этой пары.
+            representative = events[-1]
+            representative = dict(representative)
+            representative["pair_id"] = pair_id
+            pair_representatives.append(representative)
+
+        count = len(pair_representatives)
+        if count >= 3:
+            chosen = pair_representatives[-3:]
+            compensated = sum(bool(e["compensated"]) for e in chosen)
+            dates = ", ".join(e["pause_end"].strftime("%d.%m.%Y") for e in chosen)
+            comments.append(
+                f"3 сокращенных еженедельных паузы в периоде "
+                f"(компенсировано {compensated}/3): {dates}"
+            )
+        elif count == 2:
+            chosen = pair_representatives
+            compensated = sum(bool(e["compensated"]) for e in chosen)
+            consecutive = (chosen[1]["pair_id"] - chosen[0]["pair_id"]).days == 7
+            sequence_text = "подряд" if consecutive else "не подряд"
+            dates = ", ".join(e["pause_end"].strftime("%d.%m.%Y") for e in chosen)
+            comments.append(
+                f"2 сокращенных еженедельных паузы в периоде, {sequence_text} "
+                f"(компенсировано {compensated}/2): {dates}"
+            )
+
+        same_date_counts = {}
+        for event in raw_window:
+            key = event["pause_end"].date()
+            same_date_counts[key] = same_date_counts.get(key, 0) + 1
+        duplicate_dates = sorted(d for d, cnt in same_date_counts.items() if cnt >= 2)
+        if duplicate_dates:
+            dates = ", ".join(pd.Timestamp(d).strftime("%d.%m.%Y") for d in duplicate_dates)
+            comments.append(f"две паузы на одну дату - {dates}")
+
+        return " • ".join(comments)
+
     processed_rows = []
-    
-    for v_name, v_group in agg_df.sort_values(["vehicle_name", "shift_start"]).groupby("vehicle_name"):
+    for _, v_group in agg_df.sort_values(
+        ["vehicle_name", "control_dt", "shift_start"]
+    ).groupby("vehicle_name", sort=False):
         v_group = v_group.reset_index(drop=True)
         active_debts = []
-        weekly_reduced_daily_count = {}
-        reduced_weekly_pause_timestamps = []
-        
-        for idx, row in v_group.iterrows():
+        weekly_events_raw = []
+        daily_week_counts = {}
+
+        for _, row in v_group.iterrows():
             h = row["rest_before_shift_hours"]
             p_end = row["pause_end"]
-            shift_dt = row["shift_start"]
-            
-            # Строгое правило 4 недель (28 дней): отсекаем долги старше 28 дней
-            four_weeks_ago_limit = shift_dt - pd.Timedelta(days=28)
-            active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
-            
+            control_dt = row["control_dt"]
+            limit = control_dt - pd.Timedelta(days=28)
+            active_debts = [d for d in active_debts if d["created_at"] >= limit]
+
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
             violation_description = ""
-            
+
             if pd.isna(h):
-                row["status_color"] = ""
-                row["display_text"] = ""
-                row["violation_description"] = ""
                 debt_bal = float(sum(d["debt_hours"] for d in active_debts))
                 row["debt_balance"] = debt_bal
                 if active_debts and debt_bal > 0:
-                    oldest_debt = active_debts[0]
-                    row["debt_days_counter"] = (shift_dt.normalize() - oldest_debt["created_at"].normalize()).days + 1
+                    oldest = min(active_debts, key=lambda d: d["created_at"])
+                    row["debt_days_counter"] = (
+                        control_dt.normalize() - oldest["created_at"].normalize()
+                    ).days + 1
                 else:
                     row["debt_days_counter"] = 0
+                row["status_color"] = ""
+                row["display_text"] = ""
+                row["violation_description"] = ""
+                row["period_comment"] = build_period_comment(
+                    control_dt, daily_week_counts, weekly_events_raw
+                )
                 processed_rows.append(row)
                 continue
 
-            end_weekday = p_end.dayofweek if pd.notna(p_end) else shift_dt.dayofweek
-            is_weekend_end = end_weekday in [0, 6] # Воскресенье (6) или Понедельник (0)
-
+            end_weekday = p_end.dayofweek if pd.notna(p_end) else control_dt.dayofweek
+            is_weekend_end = end_weekday in [0, 6]
             total_debt_hours = sum(d["debt_hours"] for d in active_debts)
 
-            # 1. Критическое нарушение (< 9 часов)
             if h < 9.0:
                 color_type = "critical"
                 violation_description = "Критическое нарушение: Слишком короткая суточная пауза"
 
-            # 2. Сокращенная суточная пауза (9 - 11 ч)
             elif 9.0 <= h < 11.0:
                 if is_weekend_end:
                     color_type = "red"
@@ -247,118 +429,127 @@ def process_file_fast(file_bytes, file_name):
                 else:
                     color_type = "yellow"
                     violation_description = "Сокращенная суточная пауза (будни)"
-
-                # Лимит: не более 3 сокращенных суточных пауз за календарную неделю
                 week_key = row["week_start"]
-                weekly_reduced_daily_count[week_key] = weekly_reduced_daily_count.get(week_key, 0) + 1
-                if weekly_reduced_daily_count[week_key] >= 4:
+                daily_week_counts[week_key] = daily_week_counts.get(week_key, 0) + 1
+                if daily_week_counts[week_key] >= 4:
                     color_type = "red"
                     violation_description = "Превышение лимита сокращенных суточных пауз в неделю"
 
-            # 3. Пауза от 11 часов и выше
             elif h >= 11.0:
-                is_weekend_end = end_weekday in [0, 6]  # Вс (6) или Пн (0)
-
                 if h >= 45.0:
-                    # Полноценная еженедельная пауза (45+) — гасит весь пакет долгов.
-                    # Работает для ЛЮБОГО дня недели, не только для Вс/Пн.
-                    req_h = 45.0 + total_debt_hours
-                    if active_debts and h >= req_h:
+                    required_h = 45.0 + total_debt_hours
+                    if active_debts and h >= required_h:
                         extra_h = h - 45.0
                         color_type = "green"
                         display_str = f"45+{extra_h:.2f}"
                         violation_description = "Компенсация всего пакета долгов"
+                        compensation_dt = pd.Timestamp(p_end if pd.notna(p_end) else control_dt)
+                        for debt in active_debts:
+                            if compensation_dt > debt["created_at"]:
+                                debt["event"]["compensated"] = True
+                                debt["event"]["compensated_at"] = compensation_dt
                         active_debts.clear()
                     else:
                         color_type = "blue"
-                        violation_description = ""
 
                 elif is_weekend_end:
-                    # Сокращенная пауза (11–45ч), выпавшая на Вс/Пн
                     if h < 24.0:
                         color_type = "red"
                         violation_description = "Нарушение: Пауза менее 24 часов на выходных"
-                    else:  # 24.0 <= h < 45.0
-                        color_type = "orange"
-                        debt_val = 45.0 - h
-                        violation_description = "Сокращенная еженедельная пауза. Создан долг"
-                        weekend_end_ref = p_end if pd.notna(p_end) else shift_dt
+                    else:
+                        pause_end_ref = pd.Timestamp(p_end if pd.notna(p_end) else control_dt)
+                        pair_id = weekend_pair_id(pause_end_ref)
+                        event = {
+                            "pause_end": pause_end_ref,
+                            "pair_id": pair_id,
+                            "debt_hours": 45.0 - h,
+                            "compensated": False,
+                            "compensated_at": None,
+                        }
+                        weekly_events_raw.append(event)
                         active_debts.append({
-                            "debt_hours": debt_val,
-                            "source_weekend_end": weekend_end_ref,
-                            "created_at": shift_dt
+                            "debt_hours": 45.0 - h,
+                            "created_at": pause_end_ref,
+                            "event": event,
                         })
 
-                        # Лимит: не более 2 сокращенных еженедельных пауз (24–45ч, Вс/Пн)
-                        # в скользящем окне 4 недель (28 дней). Долг создаётся как обычно.
-                        reduced_weekly_pause_timestamps[:] = [
-                            t for t in reduced_weekly_pause_timestamps if t >= four_weeks_ago_limit
-                        ]
-                        occurrence_count = len(reduced_weekly_pause_timestamps) + 1
-                        reduced_weekly_pause_timestamps.append(shift_dt)
-                        if occurrence_count >= 3:
+                        latest_sunday = pause_end_ref.normalize() - pd.Timedelta(
+                            days=(pause_end_ref.dayofweek - 6) % 7
+                        )
+                        last_four_pairs = {
+                            latest_sunday - pd.Timedelta(weeks=i) for i in range(4)
+                        }
+                        unique_pairs = {
+                            e["pair_id"] for e in weekly_events_raw
+                            if pd.notna(e["pair_id"])
+                            and e["pair_id"] in last_four_pairs
+                            and e["pause_end"] >= limit
+                        }
+                        pair_count = len(unique_pairs)
+                        if pair_count >= 3:
                             color_type = "red"
-                            violation_description = "Превышение лимита сокращенных еженедельных пауз за период 4 недель"
+                            violation_description = "3 сокращенных еженедельных паузы в периоде"
+                        elif pair_count == 2:
+                            ordered = sorted(unique_pairs)
+                            consecutive = (ordered[-1] - ordered[-2]).days == 7
+                            color_type = "orange"
+                            violation_description = (
+                                "2 сокращенных еженедельных паузы в периоде, "
+                                + ("подряд" if consecutive else "не подряд")
+                            )
+                        else:
+                            color_type = "orange"
+                            violation_description = "Сокращенная еженедельная пауза. Создан долг"
 
                 else:
-                    # Вт, Ср, Чт, Пт, Сб — схема 11+ для паузы 11–45ч
                     max_debt_age_days = 0
                     if active_debts:
                         oldest_dt = min(d["created_at"] for d in active_debts)
-                        max_debt_age_days = (shift_dt.normalize() - oldest_dt.normalize()).days
-
-                    req_h = 11.0 + total_debt_hours
-                    if active_debts and h >= req_h and max_debt_age_days <= 7:
+                        max_debt_age_days = (
+                            control_dt.normalize() - oldest_dt.normalize()
+                        ).days
+                    required_h = 11.0 + total_debt_hours
+                    if active_debts and h >= required_h and max_debt_age_days <= 7:
                         extra_h = h - 11.0
                         color_type = "green"
                         display_str = f"11+{extra_h:.2f}"
                         violation_description = "Компенсация всего пакета долгов"
-                        active_debts.clear()  # ПАКЕТНОЕ ПОГАШЕНИЕ ВСЕЙ ОЧЕРЕДИ
-                    else:
-                        color_type = ""
-                        violation_description = ""
+                        compensation_dt = pd.Timestamp(p_end if pd.notna(p_end) else control_dt)
+                        for debt in active_debts:
+                            if compensation_dt > debt["created_at"]:
+                                debt["event"]["compensated"] = True
+                                debt["event"]["compensated_at"] = compensation_dt
+                        active_debts.clear()
 
-            # Финальная проверка окна 4 недель для актуальных долгов
-            active_debts = [d for d in active_debts if d["created_at"] >= four_weeks_ago_limit]
-
+            active_debts = [d for d in active_debts if d["created_at"] >= limit]
             debt_bal = float(sum(d["debt_hours"] for d in active_debts))
             row["debt_balance"] = debt_bal
             if active_debts and debt_bal > 0:
-                oldest_debt = active_debts[0]
-                row["debt_days_counter"] = (shift_dt.normalize() - oldest_debt["created_at"].normalize()).days + 1
+                oldest = min(active_debts, key=lambda d: d["created_at"])
+                row["debt_days_counter"] = (
+                    control_dt.normalize() - oldest["created_at"].normalize()
+                ).days + 1
             else:
                 row["debt_days_counter"] = 0
-
             row["status_color"] = color_type
             row["display_text"] = display_str
             row["violation_description"] = violation_description
+            row["period_comment"] = build_period_comment(
+                control_dt, daily_week_counts, weekly_events_raw
+            )
             processed_rows.append(row)
 
     res_df = pd.DataFrame(processed_rows)
-    
     res_df["pause_start"] = pd.to_datetime(res_df["pause_start"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
     res_df["pause_end"] = pd.to_datetime(res_df["pause_end"]).dt.strftime("%Y-%m-%d %H:%M").fillna("-")
-
     cols = [
-        "dt_date",
-        "date",
-        "weekday",
-        "group",
-        "vehicle_country",
-        "vehicle_name",
-        "driver_name",
-        "rest_country_before_shift",
-        "rest_before_shift_hours",
-        "display_text",
-        "status_color",
-        "violation_description",
-        "pause_start",
-        "pause_end",
-        "debt_balance",
-        "debt_days_counter",
+        "dt_date", "date", "weekday", "group", "vehicle_country",
+        "vehicle_name", "driver_name", "rest_country_before_shift",
+        "rest_before_shift_hours", "display_text", "status_color",
+        "violation_description", "pause_start", "pause_end",
+        "debt_balance", "debt_days_counter", "period_comment",
     ]
     return res_df[cols]
-
 
 @st.cache_data
 def convert_df_to_excel(df):
@@ -559,7 +750,7 @@ if uploaded_file:
 
     nav_page = st.radio(
         "Навигация",
-        options=["Main", "Calendar", "Compensation"],
+        options=["Main", "Calendar"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -704,7 +895,81 @@ if uploaded_file:
         render_data_table(filtered, "Мониторинг смен")
 
     elif nav_page == "Calendar":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
+        st.markdown("<div class='main-header' style='margin-top: 15px;'>Актуальное состояние машин</div>", unsafe_allow_html=True)
+
+        latest_summary = (
+            daily_df.sort_values(["vehicle_name", "dt_date", "pause_end", "date"])
+            .groupby("vehicle_name", as_index=False)
+            .last()
+        )
+        summary_df = latest_summary[[
+            "group", "vehicle_name", "debt_balance", "debt_days_counter", "period_comment"
+        ]].copy()
+        summary_df.columns = [
+            "Группа", "Машина", "Актуальная компенсация",
+            "Возраст актуального долга", "Комментарий"
+        ]
+
+        st.markdown("**Фильтры актуального состояния**")
+        f1, f2, f3 = st.columns([1, 1, 2])
+        max_comp = max(float(summary_df["Актуальная компенсация"].max() or 0.0), 0.0)
+        max_age = max(int(summary_df["Возраст актуального долга"].max() or 0), 0)
+        with f1:
+            comp_filter = st.slider(
+                "Актуальная компенсация",
+                min_value=0.0,
+                max_value=max(max_comp, 0.5),
+                value=(0.0, max(max_comp, 0.5)),
+                step=0.5,
+                key="calendar_comp_filter",
+            )
+        with f2:
+            age_filter = st.slider(
+                "Возраст актуального долга",
+                min_value=0,
+                max_value=max(max_age, 1),
+                value=(0, max(max_age, 1)),
+                step=1,
+                key="calendar_age_filter",
+            )
+        comment_categories = [
+            "4 сокращенных паузы в неделю",
+            "2 сокращенных еженедельных паузы в периоде, подряд",
+            "2 сокращенных еженедельных паузы в периоде, не подряд",
+            "3 сокращенных еженедельных паузы в периоде",
+            "две паузы на одну дату",
+        ]
+        with f3:
+            selected_summary_comments = st.multiselect(
+                "Актуальный комментарий",
+                options=comment_categories,
+                key="calendar_comment_filter",
+                placeholder="Все комментарии",
+            )
+
+        summary_mask = (
+            summary_df["Актуальная компенсация"].between(comp_filter[0], comp_filter[1])
+            & summary_df["Возраст актуального долга"].between(age_filter[0], age_filter[1])
+        )
+        if selected_summary_comments:
+            summary_mask &= summary_df["Комментарий"].fillna("").apply(
+                lambda text: any(category in text for category in selected_summary_comments)
+            )
+        filtered_summary = summary_df[summary_mask].sort_values(
+            ["Группа", "Машина"]
+        ).reset_index(drop=True)
+
+        st.dataframe(
+            filtered_summary.style.format({
+                "Актуальная компенсация": "{:.2f}",
+                "Возраст актуального долга": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=min(520, 70 + 35 * max(len(filtered_summary), 1)),
+        )
+
+        st.markdown("<div class='main-header' style='margin-top: 25px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
 
         if not filtered.empty:
             pivot_df = filtered.copy()
@@ -839,53 +1104,6 @@ if uploaded_file:
         else:
             st.info("Нет данных для отображения матрицы.")
 
-    elif nav_page == "Compensation":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Компенсация (ч.) машин</div>", unsafe_allow_html=True)
-
-        latest_df = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name", as_index=False).last()
-        
-        comp_mask = pd.Series(True, index=latest_df.index)
-        if only_debt_vehicles:
-            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_debt)
-        if only_violations:
-            comp_mask &= latest_df["vehicle_name"].isin(vehicles_with_violations)
-        if selected_groups:
-            comp_mask &= latest_df["group"].isin(selected_groups)
-        if selected_vehicles:
-            comp_mask &= latest_df["vehicle_name"].isin(selected_vehicles)
-            
-        filtered_latest = latest_df[comp_mask]
-
-        comp_df = filtered_latest[["group", "vehicle_name", "debt_balance", "debt_days_counter"]].copy()
-        comp_df.columns = ["Группа", "Машина", "Время компенсации", "Возраст долга"]
-        comp_df = comp_df.sort_values(by=["Группа", "Машина"]).reset_index(drop=True)
-
-        col_h, col_b = st.columns([4, 1])
-        with col_h:
-            st.markdown(f"<div style='font-size: 14px; font-weight: 600; margin-top: 10px;'>Найдено машин: {len(comp_df)}</div>", unsafe_allow_html=True)
-        with col_b:
-            if not comp_df.empty:
-                excel_file = convert_df_to_excel(comp_df)
-                st.download_button(
-                    label="📥 Скачать Excel",
-                    data=excel_file,
-                    file_name="compensation_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-
-        if not comp_df.empty:
-            st.dataframe(
-                comp_df.style.format({
-                    "Время компенсации": "{:.2f}",
-                    "Возраст долга": lambda x: f"{int(x)}" if pd.notna(x) and x > 0 else "-"
-                }),
-                use_container_width=True,
-                hide_index=True,
-                height=750,
-            )
-        else:
-            st.info("Данные отсутствуют.")
 
 else:
     st.markdown(
