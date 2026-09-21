@@ -606,9 +606,22 @@ if uploaded_file:
     default_start_date = max(min_date, default_start_dt.date())
     default_end_date = max_date
 
-    latest_debts_raw = daily_df.sort_values(["vehicle_name", "date"]).groupby("vehicle_name").last()["debt_balance"].astype(float)
+    # Актуальный статус машины всегда берём из последней строки этой машины.
+    latest_vehicle_state = (
+        daily_df.assign(_pause_end_sort=pd.to_datetime(daily_df["pause_end"], errors="coerce"))
+        .sort_values(["vehicle_name", "dt_date", "_pause_end_sort", "date"])
+        .groupby("vehicle_name", as_index=False)
+        .last()
+    )
+    latest_debts_raw = latest_vehicle_state.set_index("vehicle_name")["debt_balance"].astype(float)
     vehicles_with_debt = latest_debts_raw[latest_debts_raw > 0].index.tolist()
-    vehicles_with_violations = daily_df[daily_df["status_color"].isin(["red", "critical"])]["vehicle_name"].unique().tolist()
+
+    # Нарушением считаем красный/критический статус, а также оранжевое предупреждение
+    # по сокращённым еженедельным паузам.
+    vehicles_with_violations = daily_df.loc[
+        daily_df["status_color"].isin(["red", "critical", "orange"]),
+        "vehicle_name",
+    ].dropna().unique().tolist()
 
     st.sidebar.markdown(
         "<div class='filter-card'><div class='filter-card-title'>"
@@ -951,6 +964,16 @@ if uploaded_file:
             summary_df["Актуальная компенсация"].between(comp_filter[0], comp_filter[1])
             & summary_df["Возраст актуального долга"].between(age_filter[0], age_filter[1])
         )
+
+        # Общие фильтры применяются именно к машинам, а не к отдельным датам.
+        if only_debt_vehicles:
+            summary_mask &= summary_df["Машина"].isin(vehicles_with_debt)
+        if only_violations:
+            summary_mask &= summary_df["Машина"].isin(vehicles_with_violations)
+        if selected_groups:
+            summary_mask &= summary_df["Группа"].isin(selected_groups)
+        if selected_vehicles:
+            summary_mask &= summary_df["Машина"].isin(selected_vehicles)
         if selected_summary_comments:
             summary_mask &= summary_df["Комментарий"].fillna("").apply(
                 lambda text: any(category in text for category in selected_summary_comments)
@@ -971,8 +994,16 @@ if uploaded_file:
 
         st.markdown("<div class='main-header' style='margin-top: 25px;'>Календарная матрица отдыха машин</div>", unsafe_allow_html=True)
 
-        if not filtered.empty:
-            pivot_df = filtered.copy()
+        # Календарь не фильтруется по выбранному диапазону дат.
+        # В нём остаются все даты, но только для машин, прошедших фильтры
+        # актуальной компенсации, возраста долга, комментария и общие чекбоксы.
+        calendar_vehicle_names = filtered_summary["Машина"].dropna().unique().tolist()
+        calendar_filtered = daily_df[
+            daily_df["vehicle_name"].isin(calendar_vehicle_names)
+        ].drop(columns=["dt_date"]).reset_index(drop=True)
+
+        if not calendar_filtered.empty:
+            pivot_df = calendar_filtered.copy()
 
             def safe_max_hours(x):
                 valid = x.dropna()
