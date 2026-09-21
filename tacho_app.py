@@ -1031,14 +1031,20 @@ if uploaded_file:
             grouped_matrix.columns = ["max_hours", "display_text", "status_color"]
             grouped_matrix = grouped_matrix.reset_index()
 
+            # Набор дат календаря всегда фиксирован по полному daily_df.
+            # Фильтры меняют только строки-машины и никогда не удаляют столбцы дат.
+            all_calendar_dates = sorted(
+                daily_df["date"].dropna().astype(str).unique().tolist()
+            )
+
             text_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="display_text"
-            ).fillna("")
+            ).reindex(columns=all_calendar_dates).fillna("")
 
             hours_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="max_hours"
-            )
-            
+            ).reindex(columns=all_calendar_dates)
+
             display_calendar = text_matrix.copy()
             for col in hours_matrix.columns:
                 for idx in hours_matrix.index:
@@ -1080,7 +1086,14 @@ if uploaded_file:
                     pass
             
             display_calendar = display_calendar.rename(columns=new_column_names)
-            color_matrix = grouped_matrix.pivot(index="vehicle_name", columns="date", values="status_color").fillna("").rename(columns=new_column_names)
+            color_matrix = (
+                grouped_matrix.pivot(
+                    index="vehicle_name", columns="date", values="status_color"
+                )
+                .reindex(columns=all_calendar_dates)
+                .fillna("")
+                .rename(columns=new_column_names)
+            )
 
             def style_calendar_cell(data):
                 df_styles = pd.DataFrame('', index=display_calendar.index, columns=display_calendar.columns)
