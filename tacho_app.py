@@ -350,7 +350,7 @@ def process_file_fast(file_bytes, file_name):
             compensated = sum(bool(e["compensated"]) for e in chosen)
             dates = ", ".join(e["pause_end"].strftime("%d.%m.%Y") for e in chosen)
             comments.append(
-                f"3 сокращенных еженедельных паузы в периоде "
+                f"Более 2-х сокращенных еженедельных пауз в периоде "
                 f"(компенсировано {compensated}/3): {dates}"
             )
         elif count == 2:
@@ -488,7 +488,7 @@ def process_file_fast(file_bytes, file_name):
                         pair_count = len(unique_pairs)
                         if pair_count >= 3:
                             color_type = "red"
-                            violation_description = "3 сокращенных еженедельных паузы в периоде"
+                            violation_description = "Более 2-х сокращенных еженедельных пауз в периоде"
                         elif pair_count == 2:
                             ordered = sorted(unique_pairs)
                             consecutive = (ordered[-1] - ordered[-2]).days == 7
@@ -623,50 +623,54 @@ if uploaded_file:
         "vehicle_name",
     ].dropna().unique().tolist()
 
-    st.sidebar.markdown(
-        "<div class='filter-card'><div class='filter-card-title'>"
-        "Период дат</div>",
-        unsafe_allow_html=True,
-    )
-    date_range = st.sidebar.date_input(
-        "Период",
-        value=(default_start_date, default_end_date),
-        min_value=min_date,
-        max_value=max_date,
-        key="date_range",
-        label_visibility="collapsed",
-    )
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
+    # Навигация и единственный фильтр дат находятся над страницей.
+    nav_col, date_col = st.columns([4, 1])
+    with nav_col:
+        nav_page = st.radio(
+            "Навигация",
+            options=["Main", "Calendar"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+    with date_col:
+        date_range = st.date_input(
+            "Период дат",
+            value=(default_start_date, default_end_date),
+            min_value=min_date,
+            max_value=max_date,
+            key="date_range",
+        )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        period_start, period_end = date_range
+    else:
+        period_start, period_end = min_date, max_date
+
+    vehicles_with_comment = latest_vehicle_state.loc[
+        latest_vehicle_state["period_comment"].fillna("").str.strip().ne(""),
+        "vehicle_name",
+    ].dropna().tolist()
 
     st.sidebar.markdown("<div class='filter-card'>", unsafe_allow_html=True)
-    only_debt_vehicles = st.sidebar.checkbox("⚠️ Только машины с долгом", value=False, key="only_debt_checkbox")
-    only_violations = st.sidebar.checkbox("🚨 Только машины с нарушениями", value=False, key="only_violations_checkbox")
+    only_debt_vehicles = st.sidebar.checkbox(
+        "⚠️ Только машины с долгом", value=False, key="only_debt_checkbox"
+    )
+    only_comment_vehicles = st.sidebar.checkbox(
+        "💬 Только машины с комментарием", value=False, key="only_comment_checkbox"
+    )
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
     def render_select_filter(label, options, key_prefix):
         sel_key = f"{key_prefix}_select"
-        all_opts = sorted(list(set([str(x) for x in options if pd.notna(x) and str(x).strip() != ""])))
-
+        all_opts = sorted(list(set([
+            str(x) for x in options if pd.notna(x) and str(x).strip() != ""
+        ])))
         st.sidebar.markdown(
-            f"<div class='filter-card'><div"
-            f" class='filter-card-title'>{label}</div>",
+            f"<div class='filter-card'><div class='filter-card-title'>{label}</div>",
             unsafe_allow_html=True,
         )
-
         b1, b2 = st.sidebar.columns(2)
-        b1.button(
-            "Все",
-            key=f"{key_prefix}_all",
-            on_click=reset_select_key,
-            args=(sel_key, all_opts),
-        )
-        b2.button(
-            "✖ Сброс",
-            key=f"{key_prefix}_clr",
-            on_click=reset_select_key,
-            args=(sel_key, []),
-        )
-
+        b1.button("Все", key=f"{key_prefix}_all", on_click=reset_select_key, args=(sel_key, all_opts))
+        b2.button("✖ Сброс", key=f"{key_prefix}_clr", on_click=reset_select_key, args=(sel_key, []))
         selected = st.sidebar.multiselect(
             label,
             options=all_opts,
@@ -674,86 +678,40 @@ if uploaded_file:
             label_visibility="collapsed",
             placeholder="Выберите...",
         )
-
         st.sidebar.markdown("</div>", unsafe_allow_html=True)
         return selected
 
     selected_vehicle_countries = render_select_filter(
-        "Страна авто", ["CZ", "SK", "Other"], "v_countries"
+        "Страна", ["CZ", "SK", "Other"], "v_countries"
     )
-    selected_groups = render_select_filter(
-        "Группы", daily_df["group"].unique(), "groups"
-    )
-    
-    available_vehicles = daily_df["vehicle_name"].unique()
-    if only_debt_vehicles:
-        available_vehicles = [v for v in available_vehicles if v in vehicles_with_debt]
-    if only_violations:
-        available_vehicles = [v for v in available_vehicles if v in vehicles_with_violations]
-
-    selected_vehicles = render_select_filter(
-        "Машины", available_vehicles, "vehicles"
-    )
-    
-    selected_drivers = render_select_filter(
-        "Водители", daily_df["driver_name"].unique(), "drivers"
-    )
-    selected_countries = render_select_filter(
-        "Страна отдыха ДО смены",
-        daily_df["rest_country_before_shift"].unique(),
-        "countries",
-    )
-    selected_comments = render_select_filter(
-        "Комментарий",
-        daily_df["violation_description"].unique(),
-        "comments",
-    )
+    selected_groups = render_select_filter("Группа", daily_df["group"].unique(), "groups")
+    selected_vehicles = render_select_filter("Машина", daily_df["vehicle_name"].unique(), "vehicles")
+    selected_drivers = render_select_filter("Водитель", daily_df["driver_name"].unique(), "drivers")
 
     def render_range_filter(label, max_val, key_prefix, step=0.5, unit="ч"):
         min_k, max_k = f"{key_prefix}_min", f"{key_prefix}_max"
-
         if min_k not in st.session_state:
             st.session_state[min_k] = 0.0
         if max_k not in st.session_state:
             st.session_state[max_k] = float(max_val)
-
         st.sidebar.markdown(
-            f"<div class='filter-card'><div class='filter-card-title'>{label}"
-            f" ({unit})</div>",
+            f"<div class='filter-card'><div class='filter-card-title'>{label} ({unit})</div>",
             unsafe_allow_html=True,
         )
-
         c1, c2, c3 = st.sidebar.columns([2, 2, 1])
-        v_min = c1.number_input(
-            "От",
-            min_value=0.0,
-            max_value=float(max_val),
-            step=step,
-            key=min_k,
-            label_visibility="collapsed",
-        )
-        v_max = c2.number_input(
-            "До",
-            min_value=0.0,
-            max_value=float(max_val),
-            step=step,
-            key=max_k,
-            label_visibility="collapsed",
-        )
-        c3.button(
-            "✖",
-            key=f"{key_prefix}_rst",
-            on_click=reset_range_key,
-            args=(min_k, max_k, max_val),
-        )
-
+        v_min = c1.number_input("От", 0.0, float(max_val), step=step, key=min_k, label_visibility="collapsed")
+        v_max = c2.number_input("До", 0.0, float(max_val), step=step, key=max_k, label_visibility="collapsed")
+        c3.button("✖", key=f"{key_prefix}_rst", on_click=reset_range_key, args=(min_k, max_k, max_val))
         st.sidebar.markdown("</div>", unsafe_allow_html=True)
         return v_min, v_max
 
-    max_rest = max(
-        float(daily_df["rest_before_shift_hours"].max() or 24.0) + 1.0, 10.0
+    max_rest = max(float(daily_df["rest_before_shift_hours"].max() or 24.0) + 1.0, 10.0)
+    rest_min, rest_max = render_range_filter("Часов отдыха до смены", max_rest, "rest")
+    selected_countries = render_select_filter(
+        "Страна отдыха до смены",
+        daily_df["rest_country_before_shift"].unique(),
+        "countries",
     )
-    rest_min, rest_max = render_range_filter("Отдых ДО смены", max_rest, "rest")
 
     st.sidebar.button(
         "🔄 Сбросить ВСЕ фильтры",
@@ -761,42 +719,34 @@ if uploaded_file:
         on_click=reset_all_filters,
     )
 
-    nav_page = st.radio(
-        "Навигация",
-        options=["Main", "Calendar"],
-        horizontal=True,
-        label_visibility="collapsed"
-    )
-
-    mask = pd.Series(True, index=daily_df.index)
-
+    # Эти фильтры формируют множество машин и не удаляют даты/строки сами по себе.
+    vehicle_pool = set(daily_df["vehicle_name"].dropna().unique())
     if only_debt_vehicles:
-        mask &= daily_df["vehicle_name"].isin(vehicles_with_debt)
-        
-    if only_violations:
-        mask &= daily_df["vehicle_name"].isin(vehicles_with_violations)
-
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        mask &= daily_df["dt_date"].between(date_range[0], date_range[1])
-
+        vehicle_pool &= set(vehicles_with_debt)
+    if only_comment_vehicles:
+        vehicle_pool &= set(vehicles_with_comment)
     if selected_vehicle_countries:
-        mask &= daily_df["vehicle_country"].isin(selected_vehicle_countries)
+        vehicle_pool &= set(daily_df.loc[
+            daily_df["vehicle_country"].isin(selected_vehicle_countries), "vehicle_name"
+        ])
     if selected_groups:
-        mask &= daily_df["group"].isin(selected_groups)
+        vehicle_pool &= set(daily_df.loc[daily_df["group"].isin(selected_groups), "vehicle_name"])
     if selected_vehicles:
-        mask &= daily_df["vehicle_name"].isin(selected_vehicles)
+        vehicle_pool &= set(selected_vehicles)
     if selected_drivers:
-        mask &= daily_df["driver_name"].isin(selected_drivers)
-    if selected_countries:
-        mask &= daily_df["rest_country_before_shift"].isin(selected_countries)
-    if selected_comments:
-        mask &= daily_df["violation_description"].isin(selected_comments)
+        vehicle_pool &= set(daily_df.loc[
+            daily_df["driver_name"].isin(selected_drivers), "vehicle_name"
+        ])
 
+    # Период, часы отдыха и страна отдыха фильтруют конкретные строки.
+    mask = daily_df["vehicle_name"].isin(vehicle_pool)
+    mask &= daily_df["dt_date"].between(period_start, period_end)
     mask &= (
         daily_df["rest_before_shift_hours"].between(rest_min, rest_max)
         | daily_df["rest_before_shift_hours"].isna()
     )
-
+    if selected_countries:
+        mask &= daily_df["rest_country_before_shift"].isin(selected_countries)
     filtered = daily_df[mask].drop(columns=["dt_date"]).reset_index(drop=True)
 
     def render_data_table(data_to_render, title_prefix="Мониторинг смен"):
@@ -947,9 +897,8 @@ if uploaded_file:
             )
         comment_categories = [
             "4 сокращенных паузы в неделю",
-            "2 сокращенных еженедельных паузы в периоде, подряд",
-            "2 сокращенных еженедельных паузы в периоде, не подряд",
-            "3 сокращенных еженедельных паузы в периоде",
+            "2 сокращенных еженедельных паузы в периоде",
+            "Более 2-х сокращенных еженедельных пауз в периоде",
             "две паузы на одну дату",
         ]
         with f3:
@@ -966,14 +915,7 @@ if uploaded_file:
         )
 
         # Общие фильтры применяются именно к машинам, а не к отдельным датам.
-        if only_debt_vehicles:
-            summary_mask &= summary_df["Машина"].isin(vehicles_with_debt)
-        if only_violations:
-            summary_mask &= summary_df["Машина"].isin(vehicles_with_violations)
-        if selected_groups:
-            summary_mask &= summary_df["Группа"].isin(selected_groups)
-        if selected_vehicles:
-            summary_mask &= summary_df["Машина"].isin(selected_vehicles)
+        summary_mask &= summary_df["Машина"].isin(vehicle_pool)
         if selected_summary_comments:
             summary_mask &= summary_df["Комментарий"].fillna("").apply(
                 lambda text: any(category in text for category in selected_summary_comments)
@@ -982,12 +924,12 @@ if uploaded_file:
             ["Группа", "Машина"]
         ).reset_index(drop=True)
 
-        st.markdown(
-            f"<div style='font-size:14px; font-weight:600; margin:8px 0 6px 0;'>"
-            f"Найдено машин: {filtered_summary['Машина'].nunique()}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        count_col, _ = st.columns([1, 4])
+        with count_col:
+            st.metric(
+                label="Количество машин",
+                value=filtered_summary["Машина"].nunique(),
+            )
 
         st.dataframe(
             filtered_summary.style.format({
@@ -998,21 +940,15 @@ if uploaded_file:
             hide_index=True,
             height=min(520, 70 + 35 * max(len(filtered_summary), 1)),
             column_config={
-                "Группа": st.column_config.TextColumn(
-                    "Группа", width="small"
-                ),
-                "Машина": st.column_config.TextColumn(
-                    "Машина", width="small"
-                ),
+                "Группа": st.column_config.TextColumn("Группа", width="small"),
+                "Машина": st.column_config.TextColumn("Машина", width="small"),
                 "Актуальная компенсация": st.column_config.NumberColumn(
                     "Актуальная компенсация", width="small", format="%.2f"
                 ),
                 "Возраст актуального долга": st.column_config.NumberColumn(
                     "Возраст актуального долга", width="small", format="%d"
                 ),
-                "Комментарий": st.column_config.TextColumn(
-                    "Комментарий", width="large"
-                ),
+                "Комментарий": st.column_config.TextColumn("Комментарий", width="large"),
             },
         )
 
@@ -1022,9 +958,15 @@ if uploaded_file:
         # В нём остаются все даты, но только для машин, прошедших фильтры
         # актуальной компенсации, возраста долга, комментария и общие чекбоксы.
         calendar_vehicle_names = filtered_summary["Машина"].dropna().unique().tolist()
-        calendar_filtered = daily_df[
-            daily_df["vehicle_name"].isin(calendar_vehicle_names)
-        ].drop(columns=["dt_date"]).reset_index(drop=True)
+        calendar_mask = daily_df["vehicle_name"].isin(calendar_vehicle_names)
+        calendar_mask &= daily_df["dt_date"].between(period_start, period_end)
+        calendar_mask &= (
+            daily_df["rest_before_shift_hours"].between(rest_min, rest_max)
+            | daily_df["rest_before_shift_hours"].isna()
+        )
+        if selected_countries:
+            calendar_mask &= daily_df["rest_country_before_shift"].isin(selected_countries)
+        calendar_filtered = daily_df[calendar_mask].drop(columns=["dt_date"]).reset_index(drop=True)
 
         if not calendar_filtered.empty:
             pivot_df = calendar_filtered.copy()
@@ -1057,9 +999,9 @@ if uploaded_file:
 
             # Набор дат календаря всегда фиксирован по полному daily_df.
             # Фильтры меняют только строки-машины и никогда не удаляют столбцы дат.
-            all_calendar_dates = sorted(
-                daily_df["date"].dropna().astype(str).unique().tolist()
-            )
+            all_calendar_dates = pd.date_range(
+                period_start, period_end, freq="D"
+            ).strftime("%Y-%m-%d").tolist()
 
             text_matrix = grouped_matrix.pivot(
                 index="vehicle_name", columns="date", values="display_text"
