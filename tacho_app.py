@@ -559,8 +559,8 @@ def build_driving_time_data(file_bytes, file_name):
         source_df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
     required_columns = {
-        "start_date", "start_time", "vehicle_name", "driver_name",
-        "activity_type", "duration_minutes",
+        "start_date", "start_time", "end_date", "end_time",
+        "vehicle_name", "driver_name", "activity_type", "duration_minutes",
     }
     missing_columns = sorted(required_columns - set(source_df.columns))
     if missing_columns:
@@ -569,37 +569,59 @@ def build_driving_time_data(file_bytes, file_name):
             + ", ".join(missing_columns)
         )
 
+    # Полные дубликаты исходных строк учитываем только один раз.
+    source_df = source_df.drop_duplicates(keep="first").copy()
+
     if "group" not in source_df.columns:
         source_df["group"] = "Н/Д"
     source_df["group"] = source_df["group"].fillna("Н/Д").astype(str)
     source_df["activity_type"] = (
         source_df["activity_type"].fillna("").astype(str).str.upper().str.strip()
     )
-    source_df["driving_date"] = pd.to_datetime(
+    source_df["start_datetime"] = pd.to_datetime(
         source_df["start_date"].astype(str) + " " + source_df["start_time"].astype(str),
         errors="coerce",
-    ).dt.date
-    source_df["duration_minutes"] = pd.to_numeric(
-        source_df["duration_minutes"], errors="coerce"
-    ).fillna(0.0)
+    )
+    source_df["end_datetime"] = pd.to_datetime(
+        source_df["end_date"].astype(str) + " " + source_df["end_time"].astype(str),
+        errors="coerce",
+    )
 
     driving_df = source_df[
         source_df["activity_type"].eq("DRIVING")
-        & source_df["driving_date"].notna()
+        & source_df["start_datetime"].notna()
+        & source_df["end_datetime"].notna()
+        & source_df["end_datetime"].gt(source_df["start_datetime"])
     ].copy()
     if driving_df.empty:
         return pd.DataFrame(columns=[
             "group", "vehicle_name", "driver_name", "driving_date", "driving_hours"
         ])
 
+    # Каждый интервал DRIVING делим по границе календарных суток.
+    daily_parts = []
+    for row in driving_df.itertuples(index=False):
+        part_start = row.start_datetime
+        interval_end = row.end_datetime
+        while part_start < interval_end:
+            next_midnight = part_start.normalize() + pd.Timedelta(days=1)
+            part_end = min(interval_end, next_midnight)
+            daily_parts.append({
+                "group": row.group,
+                "vehicle_name": row.vehicle_name,
+                "driver_name": row.driver_name,
+                "driving_date": part_start.date(),
+                "driving_hours": (part_end - part_start).total_seconds() / 3600.0,
+            })
+            part_start = part_end
+
     return (
-        driving_df.groupby(
+        pd.DataFrame(daily_parts)
+        .groupby(
             ["group", "vehicle_name", "driver_name", "driving_date"],
             as_index=False,
-        )["duration_minutes"]
+        )["driving_hours"]
         .sum()
-        .assign(driving_hours=lambda x: x["duration_minutes"] / 60.0)
-        .drop(columns=["duration_minutes"])
         .sort_values(["driving_date", "vehicle_name", "driver_name"])
         .reset_index(drop=True)
     )
