@@ -552,6 +552,60 @@ def process_file_fast(file_bytes, file_name):
     return res_df[cols]
 
 @st.cache_data
+def build_driving_time_data(file_bytes, file_name):
+    if file_name.lower().endswith(".csv"):
+        source_df = pd.read_csv(io.BytesIO(file_bytes))
+    else:
+        source_df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+
+    required_columns = {
+        "start_date", "start_time", "vehicle_name", "driver_name",
+        "activity_type", "duration_minutes",
+    }
+    missing_columns = sorted(required_columns - set(source_df.columns))
+    if missing_columns:
+        raise ValueError(
+            "В файле отсутствуют обязательные колонки для Driving time: "
+            + ", ".join(missing_columns)
+        )
+
+    if "group" not in source_df.columns:
+        source_df["group"] = "Н/Д"
+    source_df["group"] = source_df["group"].fillna("Н/Д").astype(str)
+    source_df["activity_type"] = (
+        source_df["activity_type"].fillna("").astype(str).str.upper().str.strip()
+    )
+    source_df["driving_date"] = pd.to_datetime(
+        source_df["start_date"].astype(str) + " " + source_df["start_time"].astype(str),
+        errors="coerce",
+    ).dt.date
+    source_df["duration_minutes"] = pd.to_numeric(
+        source_df["duration_minutes"], errors="coerce"
+    ).fillna(0.0)
+
+    driving_df = source_df[
+        source_df["activity_type"].eq("DRIVING")
+        & source_df["driving_date"].notna()
+    ].copy()
+    if driving_df.empty:
+        return pd.DataFrame(columns=[
+            "group", "vehicle_name", "driver_name", "driving_date", "driving_hours"
+        ])
+
+    return (
+        driving_df.groupby(
+            ["group", "vehicle_name", "driver_name", "driving_date"],
+            as_index=False,
+        )["duration_minutes"]
+        .sum()
+        .assign(driving_hours=lambda x: x["duration_minutes"] / 60.0)
+        .drop(columns=["duration_minutes"])
+        .sort_values(["driving_date", "vehicle_name", "driver_name"])
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data
 def convert_df_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -628,7 +682,7 @@ if uploaded_file:
     with nav_col:
         nav_page = st.radio(
             "Навигация",
-            options=["Main", "Calendar"],
+            options=["Main", "Calendar", "Driving time"],
             horizontal=True,
             label_visibility="collapsed",
         )
@@ -1113,6 +1167,65 @@ if uploaded_file:
             )
         else:
             st.info("Нет данных для отображения матрицы.")
+
+
+    elif nav_page == "Driving time":
+        driving_data = build_driving_time_data(file_bytes, uploaded_file.name)
+        driving_data = driving_data[
+            driving_data["vehicle_name"].isin(vehicle_pool)
+            & driving_data["driving_date"].between(period_start, period_end)
+        ].copy()
+
+        st.markdown(
+            "<div class='main-header' style='margin-top: 15px;'>Driving time</div>",
+            unsafe_allow_html=True,
+        )
+
+        driving_table = driving_data.rename(columns={
+            "group": "Группа",
+            "vehicle_name": "Машина",
+            "driver_name": "Водитель",
+            "driving_date": "Дата",
+            "driving_hours": "Суммарное время driving (часы)",
+        })
+        st.dataframe(
+            driving_table.style.format({"Суммарное время driving (часы)": "{:.2f}"}),
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+        )
+
+        st.markdown(
+            "<div class='main-header' style='margin-top: 25px;'>Календарь Driving time</div>",
+            unsafe_allow_html=True,
+        )
+
+        if driving_data.empty:
+            st.info("Нет данных DRIVING для отображения.")
+        else:
+            driving_dates = pd.date_range(
+                period_start, period_end, freq="D"
+            ).strftime("%Y-%m-%d").tolist()
+            driving_calendar_source = (
+                driving_data.assign(
+                    date=driving_data["driving_date"].astype(str)
+                )
+                .groupby(["vehicle_name", "date"], as_index=False)["driving_hours"]
+                .sum()
+            )
+            driving_calendar = (
+                driving_calendar_source.pivot(
+                    index="vehicle_name", columns="date", values="driving_hours"
+                )
+                .reindex(columns=driving_dates)
+                .fillna(0.0)
+            )
+            driving_calendar.index.name = "Машина"
+            st.dataframe(
+                driving_calendar.style.format("{:.2f}"),
+                use_container_width=True,
+                height=750,
+            )
 
 
 else:
