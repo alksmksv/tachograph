@@ -107,21 +107,20 @@ def get_cell_style(color_type):
     return ""
 
 
-@st.cache_data(show_spinner="Обработка файла и проверка РТО...")
-def process_file_fast(file_bytes, file_name):
+@st.cache_data(show_spinner="Чтение файла...")
+def read_source_file(file_bytes, file_name):
+    """Читает исходный файл один раз; результат кэшируется и общий для всех страниц."""
     if file_name.lower().endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(file_bytes))
-    else:
-        df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+        return pd.read_csv(io.BytesIO(file_bytes))
+    return pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
-    required = {
-        "start_date", "start_time", "end_date", "end_time",
-        "vehicle_name", "driver_name", "activity_type", "duration_minutes",
-    }
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError("В файле отсутствуют обязательные колонки: " + ", ".join(missing))
 
+def normalize_activities(df):
+    """Нормализует активности (CARDLESS -> RESTING, слияние отдыха) и нарезает на смены.
+
+    Общая логика для таблицы мониторинга смен и для метрик Driving time.
+    Возвращает (df, is_rest, dur_min); смена закрывается отдыхом >= 9 часов.
+    """
     df["start_datetime"] = pd.to_datetime(
         df["start_date"].astype(str) + " " + df["start_time"].astype(str),
         errors="coerce",
@@ -232,7 +231,7 @@ def process_file_fast(file_bytes, file_name):
         normalized_groups.append(part)
 
     if not normalized_groups:
-        return pd.DataFrame()
+        return None, None, None
     df = pd.concat(normalized_groups, ignore_index=True)
     df["duration_minutes"] = (
         (df["end_datetime"] - df["start_datetime"]).dt.total_seconds() / 60.0
@@ -248,6 +247,32 @@ def process_file_fast(file_bytes, file_name):
         | (df["group"] != df["group"].shift())
     )
     df["shift_id"] = (is_rest | change_group).cumsum()
+    return df, is_rest, dur_min
+
+
+@st.cache_data(show_spinner="Обработка файла и проверка РТО...")
+def get_normalized_activities(file_bytes, file_name, dedupe=False):
+    df = read_source_file(file_bytes, file_name)
+    if dedupe:
+        df = df.drop_duplicates(keep="first")
+    return normalize_activities(df.copy())
+
+
+@st.cache_data(show_spinner="Обработка файла и проверка РТО...")
+def process_file_fast(file_bytes, file_name):
+    df = read_source_file(file_bytes, file_name)
+
+    required = {
+        "start_date", "start_time", "end_date", "end_time",
+        "vehicle_name", "driver_name", "activity_type", "duration_minutes",
+    }
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError("В файле отсутствуют обязательные колонки: " + ", ".join(missing))
+
+    df, is_rest, dur_min = get_normalized_activities(file_bytes, file_name)
+    if df is None:
+        return pd.DataFrame()
     df["rest_hours"] = np.where(is_rest, dur_min / 60.0, np.nan)
     df["rest_country"] = np.where(is_rest, df["country"], np.nan)
     df["pause_start_dt"] = pd.to_datetime(np.where(is_rest, df["start_datetime"], pd.NaT))
@@ -553,10 +578,7 @@ def process_file_fast(file_bytes, file_name):
 
 @st.cache_data
 def build_driving_time_data(file_bytes, file_name):
-    if file_name.lower().endswith(".csv"):
-        source_df = pd.read_csv(io.BytesIO(file_bytes))
-    else:
-        source_df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+    source_df = read_source_file(file_bytes, file_name)
 
     required_columns = {
         "start_date", "start_time", "end_date", "end_time",
@@ -625,6 +647,147 @@ def build_driving_time_data(file_bytes, file_name):
         .sort_values(["driving_date", "vehicle_name", "driver_name"])
         .reset_index(drop=True)
     )
+
+
+@st.cache_data(show_spinner="Расчёт показателей смен...")
+def build_shift_metrics(file_bytes, file_name):
+    """Показатели каждой смены (в часах); смены нарезаются так же, как в мониторинге РТО.
+
+    Смена открывается первым действием, которое не CARDLESS и не RESTING,
+    и закрывается последним таким действием.
+    """
+    columns = [
+        "group", "vehicle_name", "driver_name", "shift_date", "shift_open",
+        "pause", "working_total", "working_period_count",
+        "rest_during_shift", "at_work_total",
+    ]
+    raw = read_source_file(file_bytes, file_name)
+    # Полные дубликаты строк считаем один раз (как на странице Driving time).
+    df, is_rest, dur_min = get_normalized_activities(
+        file_bytes, file_name, dedupe=bool(raw.duplicated().any())
+    )
+    if df is None:
+        return pd.DataFrame(columns=columns)
+
+    act = df["activity_type"]
+    hours = dur_min / 60.0
+    work_mask = ~is_rest & ~act.isin(["CARDLESS", "RESTING"])
+    if not work_mask.any():
+        return pd.DataFrame(columns=columns)
+
+    shifts = df[work_mask].groupby("shift_id").agg(
+        group=("group", "first"),
+        vehicle_name=("vehicle_name", "first"),
+        driver_name=("driver_name", "first"),
+        shift_open=("start_datetime", "min"),
+        shift_close=("end_datetime", "max"),
+    )
+    shifts["shift_date"] = shifts["shift_open"].dt.date
+
+    # Пауза до смены: длинный отдых (>= 9 ч), с которого началась смена.
+    shifts["pause"] = hours[is_rest].groupby(df.loc[is_rest, "shift_id"]).max()
+
+    def total_hours(activity):
+        m = act.eq(activity) & ~is_rest
+        return hours[m].groupby(df.loc[m, "shift_id"]).sum()
+
+    shifts["working_total"] = total_hours("WORKING")
+    shifts["at_work_total"] = total_hours("AT_WORK")
+
+    # Отрезки WORKING строго длиннее 10 минут.
+    long_working = act.eq("WORKING") & ~is_rest & dur_min.gt(10)
+    shifts["working_period_count"] = long_working.groupby(df["shift_id"]).sum()
+
+    # Отдых внутри смены: RESTING, обрезанный границами открытия/закрытия смены.
+    rest_rows = df[act.eq("RESTING") & ~is_rest].copy()
+    rest_rows["open"] = rest_rows["shift_id"].map(shifts["shift_open"])
+    rest_rows["close"] = rest_rows["shift_id"].map(shifts["shift_close"])
+    rest_rows = rest_rows.dropna(subset=["open", "close"])
+    overlap_start = rest_rows[["start_datetime", "open"]].max(axis=1)
+    overlap_end = rest_rows[["end_datetime", "close"]].min(axis=1)
+    rest_rows["rest_h"] = (
+        (overlap_end - overlap_start).dt.total_seconds() / 3600.0
+    ).clip(lower=0)
+    shifts["rest_during_shift"] = rest_rows.groupby("shift_id")["rest_h"].sum()
+
+    for c in ["working_total", "at_work_total", "rest_during_shift"]:
+        shifts[c] = shifts[c].fillna(0.0)
+    shifts["working_period_count"] = shifts["working_period_count"].fillna(0).astype(int)
+    return shifts.reset_index(drop=True)[columns]
+
+
+@st.cache_data(show_spinner="Расчёт Driving time...")
+def build_driving_table(file_bytes, file_name):
+    """Таблица Driving time по дням + показатели смены и недельные суммы driving.
+
+    Показатели смены относятся к смене, открытой в этот день (если смен было
+    несколько - суммируются, pause берётся у первой). Недельные суммы считаются
+    по водителю (по всем его машинам) на полном файле, до любых фильтров.
+    """
+    daily = build_driving_time_data(file_bytes, file_name)
+    new_cols = [
+        "pause", "working_total", "working_period_count", "rest_during_shift",
+        "at_work_total", "driving_total_this_week", "driving_total_2_weeks",
+    ]
+    if daily.empty:
+        return daily.assign(**{c: pd.Series(dtype=float) for c in new_cols})
+
+    # --- показатели смен ---
+    shifts = build_shift_metrics(file_bytes, file_name)
+    keys = ["group", "vehicle_name", "driver_name", "shift_date"]
+    if shifts.empty:
+        shift_day = pd.DataFrame(columns=keys + new_cols[:5])
+    else:
+        shifts = shifts.sort_values("shift_open")
+        shift_day = shifts.groupby(keys, as_index=False).agg(
+            pause=("pause", "first"),
+            working_total=("working_total", "sum"),
+            working_period_count=("working_period_count", "sum"),
+            rest_during_shift=("rest_during_shift", "sum"),
+            at_work_total=("at_work_total", "sum"),
+        )
+    daily = daily.merge(
+        shift_day, how="left",
+        left_on=["group", "vehicle_name", "driver_name", "driving_date"],
+        right_on=keys,
+    ).drop(columns=["shift_date"])
+
+    # --- недельные суммы driving по водителю ---
+    day_ts = pd.to_datetime(daily["driving_date"])
+    per_driver_day = (
+        daily.assign(_d=day_ts)
+        .groupby(["_d", "driver_name"])["driving_hours"].sum()
+        .unstack("driver_name")
+    )
+    all_days = pd.date_range(per_driver_day.index.min() - pd.Timedelta(days=14),
+                             per_driver_day.index.max(), freq="D")
+    grid = per_driver_day.reindex(all_days).fillna(0.0)
+    cum = grid.cumsum()
+    cum_prev = cum.shift(1).fillna(0.0)
+
+    row_i = all_days.get_indexer(day_ts)
+    col_i = grid.columns.get_indexer(daily["driver_name"])
+    week_start = day_ts - pd.to_timedelta(day_ts.dt.dayofweek, unit="D")
+    prev_week_start = week_start - pd.Timedelta(days=7)
+    end_cum = cum.to_numpy()[row_i, col_i]
+    daily["driving_total_this_week"] = end_cum - cum_prev.to_numpy()[all_days.get_indexer(week_start), col_i]
+    daily["driving_total_2_weeks"] = end_cum - cum_prev.to_numpy()[all_days.get_indexer(prev_week_start), col_i]
+    return daily
+
+
+@st.cache_data
+def convert_sheets_to_excel(sheets):
+    """Несколько таблиц -> один Excel-файл (sheets: {имя листа: DataFrame})."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, frame in sheets.items():
+            frame.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+            worksheet = writer.sheets[sheet_name[:31]]
+            for col in worksheet.columns:
+                max_len = max(len(str(cell.value or "")) for cell in col[:300])
+                worksheet.column_dimensions[col[0].column_letter].width = min(max(max_len + 3, 12), 60)
+            worksheet.freeze_panes = "A2"
+    return output.getvalue()
 
 
 @st.cache_data
@@ -934,7 +1097,12 @@ if uploaded_file:
         render_data_table(filtered, "Мониторинг смен")
 
     elif nav_page == "Calendar":
-        st.markdown("<div class='main-header' style='margin-top: 15px;'>Актуальное состояние машин</div>", unsafe_allow_html=True)
+        cal_head_col, cal_btn_col = st.columns([4, 1])
+        with cal_head_col:
+            st.markdown("<div class='main-header' style='margin-top: 15px;'>Актуальное состояние машин</div>", unsafe_allow_html=True)
+        # Кнопка заполняется ниже, когда будут готовы обе таблицы страницы.
+        calendar_download_slot = cal_btn_col.empty()
+        calendar_matrix_export = None
 
         latest_summary = (
             daily_df.sort_values(["vehicle_name", "dt_date", "pause_end", "date"])
@@ -1187,36 +1355,77 @@ if uploaded_file:
                     "Группа": st.column_config.TextColumn("Группа", pinned=True),
                 }
             )
+            calendar_matrix_export = display_calendar.reset_index().rename(
+                columns={"vehicle_name": "Машина"}
+            )
         else:
             st.info("Нет данных для отображения матрицы.")
 
+        calendar_sheets = {"Актуальное состояние": filtered_summary}
+        if calendar_matrix_export is not None:
+            calendar_sheets["Календарная матрица"] = calendar_matrix_export
+        if not filtered_summary.empty:
+            calendar_download_slot.download_button(
+                label="📥 Скачать Excel",
+                data=convert_sheets_to_excel(calendar_sheets),
+                file_name="calendar.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="calendar_download",
+            )
+
 
     elif nav_page == "Driving time":
-        driving_data = build_driving_time_data(file_bytes, uploaded_file.name)
+        driving_data = build_driving_table(file_bytes, uploaded_file.name)
         driving_data = driving_data[
             driving_data["vehicle_name"].isin(vehicle_pool)
             & driving_data["driving_date"].between(period_start, period_end)
         ].copy()
 
-        st.markdown(
-            "<div class='main-header' style='margin-top: 15px;'>Driving time</div>",
-            unsafe_allow_html=True,
-        )
+        drv_head_col, drv_btn_col = st.columns([4, 1])
+        with drv_head_col:
+            st.markdown(
+                "<div class='main-header' style='margin-top: 15px;'>Driving time</div>",
+                unsafe_allow_html=True,
+            )
+        # Кнопка заполняется ниже, когда будут готовы обе таблицы страницы.
+        driving_download_slot = drv_btn_col.empty()
 
         driving_table = driving_data.rename(columns={
             "group": "Группа",
             "vehicle_name": "Машина",
             "driver_name": "Водитель",
             "driving_date": "Дата",
-            "driving_hours": "Суммарное время driving (часы)",
-        })
+            "pause": "pause (ч)",
+            "driving_hours": "driving total (ч)",
+            "working_total": "working total (ч)",
+            "working_period_count": "working period count",
+            "rest_during_shift": "rest during the shift (ч)",
+            "at_work_total": "AT_WORK total (ч)",
+            "driving_total_this_week": "driving total this week (ч)",
+            "driving_total_2_weeks": "driving total 2 weeks (ч)",
+        })[[
+            "Группа", "Машина", "Водитель", "Дата", "pause (ч)", "driving total (ч)",
+            "working total (ч)", "working period count", "rest during the shift (ч)",
+            "AT_WORK total (ч)", "driving total this week (ч)", "driving total 2 weeks (ч)",
+        ]]
+        hour_cols = [c for c in driving_table.columns if c.endswith("(ч)")]
         st.dataframe(
-            driving_table.style.format({"Суммарное время driving (часы)": "{:.2f}"}),
+            driving_table.style.format(
+                {**{c: "{:.2f}" for c in hour_cols}, "working period count": "{:.0f}"},
+                na_rep="-",
+            ),
             use_container_width=True,
             hide_index=True,
             height=420,
         )
+        st.caption(
+            "Показатели смены (pause, working, rest, AT_WORK) относятся к смене, открытой в этот день. "
+            "driving total this week / 2 weeks - накопленно с понедельника недели (или предыдущей недели) "
+            "по этот день включительно, по водителю."
+        )
 
+        driving_sheets = {"Driving time": driving_table}
         st.markdown(
             "<div class='main-header' style='margin-top: 25px;'>Календарь Driving time</div>",
             unsafe_allow_html=True,
@@ -1248,6 +1457,16 @@ if uploaded_file:
                 use_container_width=True,
                 height=750,
             )
+            driving_sheets["Календарь Driving time"] = driving_calendar.reset_index()
+
+        driving_download_slot.download_button(
+            label="📥 Скачать Excel",
+            data=convert_sheets_to_excel(driving_sheets),
+            file_name="driving_time.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="driving_download",
+        )
 
 
 else:
