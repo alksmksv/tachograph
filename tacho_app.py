@@ -5,6 +5,9 @@ import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Мониторинг смен РТО")
 
+# Перевод часов (03:00 -> 02:00 в ночь на 25.10.2026):
+DST_SHIFT_MINUTES = 60
+
 # ==============================================================================
 # CSS-СТИЛИ
 # ==============================================================================
@@ -132,6 +135,18 @@ def normalize_activities(df):
     df = df.dropna(subset=["start_datetime", "end_datetime"]).copy()
     df = df[df["end_datetime"] > df["start_datetime"]].copy()
 
+    # Базовый расчет длительности в минутах
+    if "duration_minutes" not in df.columns:
+        df["duration_minutes"] = (
+            (df["end_datetime"] - df["start_datetime"]).dt.total_seconds() / 60.0
+        )
+    
+    # Коррекция перехода на зимнее время (+1 час для интервалов через 25.10.2026 02:00-03:00)
+    is_dst_shift = (df["start_datetime"] < pd.Timestamp(2026, 10, 25, 2, 0)) & (
+        df["end_datetime"] > pd.Timestamp(2026, 10, 25, 3, 0)
+    )
+    df.loc[is_dst_shift, "duration_minutes"] += DST_SHIFT_MINUTES
+
     if "group" not in df.columns:
         df["group"] = "Н/Д"
     df["group"] = df["group"].fillna("Н/Д").astype(str)
@@ -180,7 +195,12 @@ def normalize_activities(df):
                 row["activity_type"] = "RESTING"
                 row["start_datetime"] = c_start
                 row["end_datetime"] = c_end
-                row["duration_minutes"] = (c_end - c_start).total_seconds() / 60.0
+                
+                dur = (c_end - c_start).total_seconds() / 60.0
+                if c_start < pd.Timestamp(2026, 10, 25, 2, 0) and c_end > pd.Timestamp(2026, 10, 25, 3, 0):
+                    dur += DST_SHIFT_MINUTES
+                
+                row["duration_minutes"] = dur
                 row["start_date"] = c_start.date()
                 row["start_time"] = c_start.time()
                 row["end_date"] = c_end.date()
@@ -204,7 +224,12 @@ def normalize_activities(df):
                         template = current_rows[-1].copy()
                         template["start_datetime"] = current_start
                         template["end_datetime"] = current_end
-                        template["duration_minutes"] = (current_end - current_start).total_seconds() / 60.0
+                        
+                        dur = (current_end - current_start).total_seconds() / 60.0
+                        if current_start < pd.Timestamp(2026, 10, 25, 2, 0) and current_end > pd.Timestamp(2026, 10, 25, 3, 0):
+                            dur += DST_SHIFT_MINUTES
+                        
+                        template["duration_minutes"] = dur
                         template["start_date"] = current_start.date()
                         template["start_time"] = current_start.time()
                         template["end_date"] = current_end.date()
@@ -220,7 +245,12 @@ def normalize_activities(df):
                 template = current_rows[-1].copy()
                 template["start_datetime"] = current_start
                 template["end_datetime"] = current_end
-                template["duration_minutes"] = (current_end - current_start).total_seconds() / 60.0
+                
+                dur = (current_end - current_start).total_seconds() / 60.0
+                if current_start < pd.Timestamp(2026, 10, 25, 2, 0) and current_end > pd.Timestamp(2026, 10, 25, 3, 0):
+                    dur += DST_SHIFT_MINUTES
+                
+                template["duration_minutes"] = dur
                 template["start_date"] = current_start.date()
                 template["start_time"] = current_start.time()
                 template["end_date"] = current_end.date()
@@ -233,9 +263,6 @@ def normalize_activities(df):
     if not normalized_groups:
         return None, None, None
     df = pd.concat(normalized_groups, ignore_index=True)
-    df["duration_minutes"] = (
-        (df["end_datetime"] - df["start_datetime"]).dt.total_seconds() / 60.0
-    )
     df = df.sort_values(group_cols + ["start_datetime", "end_datetime"]).reset_index(drop=True)
 
     act_type = df["activity_type"].astype(str).str.upper()
