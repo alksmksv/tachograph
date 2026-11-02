@@ -286,7 +286,7 @@ def get_normalized_activities(file_bytes, file_name, dedupe=False):
 
 
 @st.cache_data(show_spinner="Обработка файла и проверка РТО...")
-def process_file_fast(file_bytes, file_name):
+def process_file_fast(file_bytes, file_name, reference_date=None):
     df = read_source_file(file_bytes, file_name)
 
     required = {
@@ -345,13 +345,17 @@ def process_file_fast(file_bytes, file_name):
         lambda x: (x - pd.Timedelta(days=x.dayofweek)).normalize()
     )
 
-    # Срыв паузы: перед паузой смены есть смена, где сумма "иных действий"
-    # (всё, кроме RESTING) <= 60 минут, а перед ней - ещё одна пауза.
-    # Т.е. пауза "пауза -> действия <= 60 мин -> пауза" разорвана короткой активностью.
+    # Срыв паузы: пауза -> действия -> пауза, где время действий (от начала первого
+    # действия до конца последнего, всё кроме RESTING) <= 60 минут.
     PAUSE_BREAK_MAX_MINUTES = 60.0
-    action_mask = ~is_rest & df["activity_type"].ne("RESTING")
-    action_minutes = dur_min[action_mask].groupby(df.loc[action_mask, "shift_id"]).sum()
-    agg_df["action_minutes"] = agg_df["shift_id"].map(action_minutes).fillna(0.0)
+    action_rows = df[~is_rest & df["activity_type"].ne("RESTING")]
+    action_bounds = action_rows.groupby("shift_id").agg(
+        first_start=("start_datetime", "min"), last_end=("end_datetime", "max")
+    )
+    action_span_minutes = (
+        (action_bounds["last_end"] - action_bounds["first_start"]).dt.total_seconds() / 60.0
+    )
+    agg_df["action_span_minutes"] = agg_df["shift_id"].map(action_span_minutes)
     by_shift = agg_df.sort_values(["vehicle_name", "driver_name", "group", "shift_id"])
     prev_adjacent = (
         (by_shift["vehicle_name"] == by_shift["vehicle_name"].shift())
@@ -359,7 +363,7 @@ def process_file_fast(file_bytes, file_name):
         & (by_shift["group"] == by_shift["group"].shift())
         & (by_shift["shift_id"] - by_shift["shift_id"].shift() == 1)
     )
-    prev_minutes = by_shift["action_minutes"].shift()
+    prev_minutes = by_shift["action_span_minutes"].shift()
     prev_has_pause = by_shift["rest_before_shift_hours"].shift().notna()
     by_shift["pause_break"] = (
         prev_adjacent
@@ -381,6 +385,14 @@ def process_file_fast(file_bytes, file_name):
         if d.dayofweek == 0:  # понедельник
             return d - pd.Timedelta(days=1)
         return pd.NaT
+
+    # Срыв паузы проверяется только в последней паре выходных относительно сегодняшней даты:
+    # пауза, закончившаяся в ПН текущей недели или в ВС предыдущей недели.
+    reference_ts = pd.Timestamp(reference_date) if reference_date else pd.Timestamp.today()
+    reference_ts = reference_ts.normalize()
+    break_pair_sunday = (
+        reference_ts - pd.Timedelta(days=reference_ts.dayofweek) - pd.Timedelta(days=1)
+    )
 
     def build_period_comment(as_of, daily_week_counts, weekly_events_raw, weekend_pause_events=()):
         as_of = pd.Timestamp(as_of)
@@ -453,11 +465,11 @@ def process_file_fast(file_bytes, file_name):
             dates = ", ".join(pd.Timestamp(d).strftime("%d.%m.%Y") for d in duplicate_dates)
             comments.append(f"две паузы на одну дату - {dates}")
 
-        # Срыв паузы - только в последней паре выходных (ВС-ПН) относительно текущей даты.
-        # Проверяется последняя пауза этой пары выходных.
+        # Срыв паузы - только в последней паре выходных (ВС-ПН) относительно сегодняшней
+        # даты; проверяется последняя пауза этой пары.
         last_pair_events = [
             e for e in weekend_pause_events
-            if e["pair_id"] == latest_sunday and e["pause_end"] <= as_of
+            if e["pair_id"] == break_pair_sunday and e["pause_end"] <= as_of
         ]
         if last_pair_events:
             last_event = max(last_pair_events, key=lambda e: e["pause_end"])
@@ -911,7 +923,10 @@ with st.sidebar.expander("📁 Файл данных", expanded=True):
 
 if uploaded_file:
     file_bytes = uploaded_file.getvalue()
-    daily_df = process_file_fast(file_bytes, uploaded_file.name)
+    # Сегодняшняя дата входит в ключ кэша: пара выходных для "срыва паузы" меняется по дням.
+    daily_df = process_file_fast(
+        file_bytes, uploaded_file.name, pd.Timestamp.today().strftime("%Y-%m-%d")
+    )
 
     min_date = daily_df["dt_date"].min()
     max_date = daily_df["dt_date"].max()
