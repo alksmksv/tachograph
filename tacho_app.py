@@ -345,6 +345,34 @@ def process_file_fast(file_bytes, file_name):
         lambda x: (x - pd.Timedelta(days=x.dayofweek)).normalize()
     )
 
+    # Срыв паузы: перед паузой смены есть смена, где сумма "иных действий"
+    # (всё, кроме RESTING) <= 60 минут, а перед ней - ещё одна пауза.
+    # Т.е. пауза "пауза -> действия <= 60 мин -> пауза" разорвана короткой активностью.
+    PAUSE_BREAK_MAX_MINUTES = 60.0
+    action_mask = ~is_rest & df["activity_type"].ne("RESTING")
+    action_minutes = dur_min[action_mask].groupby(df.loc[action_mask, "shift_id"]).sum()
+    agg_df["action_minutes"] = agg_df["shift_id"].map(action_minutes).fillna(0.0)
+    by_shift = agg_df.sort_values(["vehicle_name", "driver_name", "group", "shift_id"])
+    prev_adjacent = (
+        (by_shift["vehicle_name"] == by_shift["vehicle_name"].shift())
+        & (by_shift["driver_name"] == by_shift["driver_name"].shift())
+        & (by_shift["group"] == by_shift["group"].shift())
+        & (by_shift["shift_id"] - by_shift["shift_id"].shift() == 1)
+    )
+    prev_minutes = by_shift["action_minutes"].shift()
+    prev_has_pause = by_shift["rest_before_shift_hours"].shift().notna()
+    by_shift["pause_break"] = (
+        prev_adjacent
+        & prev_has_pause
+        & by_shift["rest_before_shift_hours"].notna()
+        & prev_minutes.gt(0)
+        & prev_minutes.le(PAUSE_BREAK_MAX_MINUTES)
+    )
+    agg_df["pause_break"] = (
+        agg_df["shift_id"].map(by_shift.set_index("shift_id")["pause_break"])
+        .fillna(False).astype(bool)
+    )
+
     def weekend_pair_id(pause_end):
         """Идентификатор пары ВС-ПН: дата воскресенья этой пары."""
         d = pd.Timestamp(pause_end).normalize()
@@ -354,7 +382,7 @@ def process_file_fast(file_bytes, file_name):
             return d - pd.Timedelta(days=1)
         return pd.NaT
 
-    def build_period_comment(as_of, daily_week_counts, weekly_events_raw):
+    def build_period_comment(as_of, daily_week_counts, weekly_events_raw, weekend_pause_events=()):
         as_of = pd.Timestamp(as_of)
         limit = as_of - pd.Timedelta(days=28)
         comments = []
@@ -425,6 +453,19 @@ def process_file_fast(file_bytes, file_name):
             dates = ", ".join(pd.Timestamp(d).strftime("%d.%m.%Y") for d in duplicate_dates)
             comments.append(f"две паузы на одну дату - {dates}")
 
+        # Срыв паузы - только в последней паре выходных (ВС-ПН) относительно текущей даты.
+        # Проверяется последняя пауза этой пары выходных.
+        last_pair_events = [
+            e for e in weekend_pause_events
+            if e["pair_id"] == latest_sunday and e["pause_end"] <= as_of
+        ]
+        if last_pair_events:
+            last_event = max(last_pair_events, key=lambda e: e["pause_end"])
+            if last_event["broken"]:
+                comments.append(
+                    f"Срыв паузы (<=60 мин.) - {last_event['pause_end'].strftime('%d.%m.%Y')}"
+                )
+
         return " • ".join(comments)
 
     processed_rows = []
@@ -434,6 +475,7 @@ def process_file_fast(file_bytes, file_name):
         v_group = v_group.reset_index(drop=True)
         active_debts = []
         weekly_events_raw = []
+        weekend_pause_events = []
         daily_week_counts = {}
 
         for _, row in v_group.iterrows():
@@ -442,6 +484,14 @@ def process_file_fast(file_bytes, file_name):
             control_dt = row["control_dt"]
             limit = control_dt - pd.Timedelta(days=28)
             active_debts = [d for d in active_debts if d["created_at"] >= limit]
+
+            # Все паузы, заканчивающиеся в ВС/ПН (любой длины) - для проверки срыва паузы.
+            if pd.notna(h) and pd.notna(p_end) and p_end.dayofweek in (0, 6):
+                weekend_pause_events.append({
+                    "pause_end": pd.Timestamp(p_end),
+                    "pair_id": weekend_pair_id(p_end),
+                    "broken": bool(row["pause_break"]),
+                })
 
             color_type = ""
             display_str = f"{h:.2f}" if pd.notna(h) else ""
@@ -461,7 +511,7 @@ def process_file_fast(file_bytes, file_name):
                 row["display_text"] = ""
                 row["violation_description"] = ""
                 row["period_comment"] = build_period_comment(
-                    control_dt, daily_week_counts, weekly_events_raw
+                    control_dt, daily_week_counts, weekly_events_raw, weekend_pause_events
                 )
                 processed_rows.append(row)
                 continue
@@ -587,7 +637,7 @@ def process_file_fast(file_bytes, file_name):
             row["display_text"] = display_str
             row["violation_description"] = violation_description
             row["period_comment"] = build_period_comment(
-                control_dt, daily_week_counts, weekly_events_raw
+                control_dt, daily_week_counts, weekly_events_raw, weekend_pause_events
             )
             processed_rows.append(row)
 
@@ -1171,6 +1221,7 @@ if uploaded_file:
             "2 сокращенных еженедельных паузы в периоде",
             "Более 2-х сокращенных еженедельных пауз в периоде",
             "две паузы на одну дату",
+            "Срыв паузы (<=60 мин.)",
         ]
         with f3:
             selected_summary_comments = st.multiselect(
