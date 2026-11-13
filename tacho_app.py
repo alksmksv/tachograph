@@ -1202,10 +1202,10 @@ if uploaded_file:
             .last()
         )
         summary_df = latest_summary[[
-            "group", "vehicle_name", "debt_balance", "debt_days_counter", "period_comment"
+            "group", "vehicle_name", "driver_name", "debt_balance", "debt_days_counter", "period_comment"
         ]].copy()
         summary_df.columns = [
-            "Группа", "Машина", "Актуальная компенсация",
+            "Группа", "Машина", "Водитель", "Актуальная компенсация",
             "Возраст актуального долга", "Комментарий"
         ]
 
@@ -1279,6 +1279,7 @@ if uploaded_file:
             column_config={
                 "Группа": st.column_config.TextColumn("Группа", width="small"),
                 "Машина": st.column_config.TextColumn("Машина", width="small"),
+                "Водитель": st.column_config.TextColumn("Водитель", width="medium"),
                 "Актуальная компенсация": st.column_config.NumberColumn(
                     "Актуальная компенсация", width="small", format="%.2f"
                 ),
